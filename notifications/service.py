@@ -56,6 +56,13 @@ ROUTING_TABLE: dict[str, list[str]] = {
     # Position Guard: symbol carrying unreviewed long ("BUY") exposure across
     # existing position + regular orders + GTTs
     "POSITION_GUARD_ALERT":     ["telegram", "web_push", "in_app"],
+    # Intraday Algo: live scan-triggered options alerts requiring Take/Paper/Ignore
+    "INTRADAY_ALGO_SCAN_TRIGGERED": ["telegram", "web_push", "in_app"],
+    "INTRADAY_ALGO_TRADE_TAKEN":    ["telegram", "in_app"],
+    "INTRADAY_ALGO_STOP_HIT":       ["telegram", "in_app"],
+    "INTRADAY_ALGO_TARGET_HIT":     ["telegram", "in_app"],
+    # NIFTY price enters/exits a swing_levels combined confluence zone
+    "NIFTY_ZONE_ALERT":             ["telegram", "web_push", "in_app"],
 }
 
 SEVERITY_TABLE: dict[str, str] = {
@@ -92,6 +99,13 @@ SEVERITY_TABLE: dict[str, str] = {
     # Position Guard: symbol carrying unreviewed long ("BUY") exposure across
     # existing position + regular orders + GTTs
     "POSITION_GUARD_ALERT":     "warning",
+    # Intraday Algo: live scan-triggered options alerts requiring Take/Paper/Ignore
+    "INTRADAY_ALGO_SCAN_TRIGGERED": "info",
+    "INTRADAY_ALGO_TRADE_TAKEN":    "info",
+    "INTRADAY_ALGO_STOP_HIT":       "warning",
+    "INTRADAY_ALGO_TARGET_HIT":     "info",
+    # NIFTY price enters/exits a swing_levels combined confluence zone
+    "NIFTY_ZONE_ALERT":             "warning",
 }
 
 

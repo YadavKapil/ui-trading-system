@@ -21,6 +21,7 @@ import holidays as holidays_lib
 
 from common_lib import get_ist_now, IST
 from datetime import time as dtime
+from db_utils import connect_with_busy_timeout, enable_wal_once
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -75,10 +76,15 @@ _INSTRUMENTS_DDL = """
 
 
 def get_db_connection() -> sqlite3.Connection:
-    """Return a connection to the SQLite instruments database."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Return a connection to the SQLite instruments database.
+
+    Uses a bounded busy_timeout so a reader waits out a brief writer lock
+    (e.g. sync_instruments()'s atomic swap) instead of failing immediately
+    with "database is locked" — this is the most-called DB in the app, so
+    public-traffic-driven read concurrency needs the same protection already
+    applied to cas_tracker.db and sensibull.db.
+    """
+    return connect_with_busy_timeout(DB_PATH)
 
 
 def _table_exists(cursor: sqlite3.Cursor, table_name: str) -> bool:
@@ -131,6 +137,8 @@ def init_db() -> None:
     Also cleans up any orphaned ``instruments_new`` staging table left by a
     previously crashed sync.
     """
+    enable_wal_once(DB_PATH)
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -155,8 +163,17 @@ def init_db() -> None:
     # Indexes on the live table
     _add_indexes(cursor)
 
-    # Clean up any staging table orphan from a previous crash
-    cursor.execute("DROP TABLE IF EXISTS instruments_new")
+    # Clean up any staging table orphan from a previous crash — but only if no
+    # sync is currently building instruments_new. init_db() is called from many
+    # unguarded call sites; without this check one of them could drop the
+    # staging table out from under a concurrent sync_instruments() run (which
+    # holds _sync_lock for the several seconds the Kite instruments() fetch
+    # takes), causing a spurious "no such table: instruments_new" failure.
+    if _sync_lock.acquire(blocking=False):
+        try:
+            cursor.execute("DROP TABLE IF EXISTS instruments_new")
+        finally:
+            _sync_lock.release()
 
     # Session token table for headless API access
     cursor.execute("""
@@ -517,6 +534,17 @@ def _sync_instruments_locked(kite: Any) -> bool:  # type: ignore[type-arg]
         get_instrument_by_token.cache_clear()
         is_market_holiday.cache_clear()
 
+        # Prune Position Guard ignore rows for symbols (e.g. expired
+        # contracts) that no longer exist in the freshly synced table.
+        try:
+            from position_guard.db import cleanup_ignored_symbols_not_in_instruments
+
+            cleanup_ignored_symbols_not_in_instruments()
+        except Exception:
+            logger.exception(
+                "sync_instruments: position_guard ignore-list cleanup failed"
+            )
+
     except Exception as exc:
         error_msg = str(exc)
         logger.error(
@@ -573,7 +601,7 @@ def is_market_holiday(check_date: datetime.date) -> bool:
         True if the date is an NSE holiday, False otherwise.
     """
     try:
-        with sqlite3.connect(DB_PATH) as conn:
+        with connect_with_busy_timeout(DB_PATH) as conn:
             row = conn.execute(
                 "SELECT 1 FROM market_holidays"
                 " WHERE holiday_date = ? AND exchange = 'NSE'",
@@ -1291,6 +1319,226 @@ def get_upcoming_expiries(underlying_name: str, count: int = 2) -> list[str]:
     except Exception as exc:
         logger.warning("get_upcoming_expiries(%s): %s", underlying_name, exc)
         return []
+
+
+def get_strikes_for_expiry(
+    underlying_name: str, expiry: str, option_type: str
+) -> list[float]:
+    """Return sorted strikes available for an underlying/expiry/option type.
+
+    Args:
+        underlying_name: e.g. "NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"
+        expiry: Expiry date string in YYYY-MM-DD format.
+        option_type: "CE" or "PE".
+
+    Returns:
+        Sorted list of strike prices. Empty list if the DB is unavailable
+        or has no matching rows.
+    """
+    segment_map: dict[str, str] = {
+        "NIFTY": "NFO-OPT",
+        "BANKNIFTY": "NFO-OPT",
+        "FINNIFTY": "NFO-OPT",
+        "SENSEX": "BFO-OPT",
+    }
+    segment = segment_map.get(underlying_name, "NFO-OPT")
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT strike
+            FROM instruments
+            WHERE name = ?
+              AND segment = ?
+              AND expiry = ?
+              AND instrument_type = ?
+            ORDER BY strike ASC
+            """,
+            (underlying_name, segment, expiry, option_type),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [row["strike"] for row in rows]
+    except Exception as exc:
+        logger.warning(
+            "get_strikes_for_expiry(%s, %s, %s): %s",
+            underlying_name, expiry, option_type, exc,
+        )
+        return []
+
+
+def get_trading_days_to_expiry(
+    expiry_date: datetime.date, from_date: Optional[datetime.date] = None
+) -> int:
+    """Count NSE trading days remaining to expiry, excluding weekends and holidays.
+
+    Unlike the naive ``np.busday_count`` used elsewhere in this codebase
+    (which only excludes Sat/Sun), this consults the ``market_holidays``
+    table so declared NSE holidays (Diwali, Republic Day, etc.) are also
+    excluded — giving a materially more accurate DTE for the Amplitude
+    Testbed's gamma-sensitive calculations near expiry.
+
+    Args:
+        expiry_date: The option's expiry date.
+        from_date: Date to count from (defaults to today).
+
+    Returns:
+        Number of trading days from from_date to expiry_date, inclusive of
+        both endpoints if they are trading days. 0 if expiry_date is before
+        from_date.
+    """
+    start = from_date or datetime.date.today()
+    if expiry_date < start:
+        return 0
+    count = 0
+    current = start
+    one_day = datetime.timedelta(days=1)
+    while current <= expiry_date:
+        if current.weekday() < 5 and not is_market_holiday(current):
+            count += 1
+        current += one_day
+    return count
+
+
+def get_next_expiry(underlying_name: str, expiry: str) -> Optional[str]:
+    """Return the earliest expiry strictly after the given one, for the same underlying.
+
+    Used to auto-derive the Amplitude Testbed's "Reference DTE" as the
+    trading-day spacing between two consecutive expiries — i.e. the nominal
+    full cycle length a freshly-listed contract of this series would have.
+    We use the *next* expiry rather than the previous one because
+    ``instruments.db`` is synced from Kite's live instrument dump, which
+    never includes expired contracts — the previous expiry is reliably
+    absent for the nearest (most commonly selected) expiry, which would
+    make that direction useless in practice.
+
+    Args:
+        underlying_name: e.g. "NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"
+        expiry: Expiry date string in YYYY-MM-DD format.
+
+    Returns:
+        The next expiry date string in YYYY-MM-DD format, or None if none
+        exists (e.g. `expiry` is the furthest one currently synced) or the
+        DB is unavailable.
+    """
+    segment_map: dict[str, str] = {
+        "NIFTY": "NFO-OPT",
+        "BANKNIFTY": "NFO-OPT",
+        "FINNIFTY": "NFO-OPT",
+        "SENSEX": "BFO-OPT",
+    }
+    segment = segment_map.get(underlying_name, "NFO-OPT")
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT DISTINCT expiry
+            FROM instruments
+            WHERE name = ? AND segment = ? AND expiry > ?
+            ORDER BY expiry ASC
+            LIMIT 1
+            """,
+            (underlying_name, segment, expiry),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row["expiry"] if row else None
+    except Exception as exc:
+        logger.warning("get_next_expiry(%s, %s): %s", underlying_name, expiry, exc)
+        return None
+
+
+def get_option_chain_for_expiry(
+    underlying_name: str, expiry: str
+) -> List[Dict[str, Any]]:
+    """Return every CE/PE instrument row for an underlying's expiry in one query.
+
+    Args:
+        underlying_name: e.g. "NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"
+        expiry: Expiry date string in YYYY-MM-DD format.
+
+    Returns:
+        List of instrument rows (tradingsymbol, exchange, strike,
+        instrument_type, ...), sorted by strike then instrument_type.
+        Empty list if the DB is unavailable or has no matching rows.
+    """
+    segment_map: dict[str, str] = {
+        "NIFTY": "NFO-OPT",
+        "BANKNIFTY": "NFO-OPT",
+        "FINNIFTY": "NFO-OPT",
+        "SENSEX": "BFO-OPT",
+    }
+    segment = segment_map.get(underlying_name, "NFO-OPT")
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM instruments
+            WHERE name = ? AND segment = ? AND expiry = ?
+              AND instrument_type IN ('CE', 'PE')
+            ORDER BY strike ASC, instrument_type ASC
+            """,
+            (underlying_name, segment, expiry),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.warning(
+            "get_option_chain_for_expiry(%s, %s): %s", underlying_name, expiry, exc
+        )
+        return []
+
+
+def get_option_instrument(
+    underlying_name: str, expiry: str, strike: float, option_type: str
+) -> Optional[Dict[str, Any]]:
+    """Return the instrument row for a specific underlying/expiry/strike/type.
+
+    Args:
+        underlying_name: e.g. "NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY"
+        expiry: Expiry date string in YYYY-MM-DD format.
+        strike: Strike price.
+        option_type: "CE" or "PE".
+
+    Returns:
+        A dict of instrument metadata (including tradingsymbol, exchange),
+        or None if not found.
+    """
+    segment_map: dict[str, str] = {
+        "NIFTY": "NFO-OPT",
+        "BANKNIFTY": "NFO-OPT",
+        "FINNIFTY": "NFO-OPT",
+        "SENSEX": "BFO-OPT",
+    }
+    segment = segment_map.get(underlying_name, "NFO-OPT")
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM instruments
+            WHERE name = ? AND segment = ? AND expiry = ?
+              AND strike = ? AND instrument_type = ?
+            """,
+            (underlying_name, segment, expiry, strike, option_type),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as exc:
+        logger.warning(
+            "get_option_instrument(%s, %s, %s, %s): %s",
+            underlying_name, expiry, strike, option_type, exc,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

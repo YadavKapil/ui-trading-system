@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import math
 import threading
 from typing import Callable
 from kiteconnect import KiteTicker
@@ -268,6 +269,7 @@ delta_calculation_days = int(option_details['delta_calculation_days'])
 
 cool_off_time = int(other_details['cool_off_time'])
 order_gtt_regular = other_details['order_gtt_regular']
+gtt_trigger_buffer_pct = float(other_details.get('gtt_trigger_buffer_pct', '0.05'))
 
 # [safety] live_trading — dry-run kill switch for order placement.
 # Read from the REAL configfile.ini only (never the example defaults layer,
@@ -519,6 +521,158 @@ def get_velocity_multiplier(symbol_type: str, symbol: str, we_config: dict) -> t
         buy_mult, sell_mult,
     )
     return (buy_mult, sell_mult)
+
+
+_ZERO_AMPLITUDE_RESULT = {"iv": 0.0, "delta": 0.0, "gamma": 0.0, "amplitude_pct": 0.0}
+
+
+def _amplitude_from_volatility(
+    spot: float,
+    strike: float,
+    dte: float,
+    option_type: str,
+    interest_rate_pct: float,
+    volatility_pct: float,
+) -> dict:
+    """Forward-price an option at a given volatility/DTE and estimate its
+    expected 1-trading-day premium move as a % of that theoretical price.
+
+    Combines delta (first-order spot sensitivity) and gamma (acceleration of
+    that sensitivity — the mechanism behind near-expiry ATM premium blowup)
+    to project one trading day's expected premium swing.
+
+    Args:
+        spot: Current underlying price.
+        strike: Option strike price.
+        dte: Days to expiry (calendar days, as consumed by greeks_lib.BS).
+        option_type: "CE" for call, "PE" for put.
+        interest_rate_pct: Risk-free rate as a percentage (e.g. 10 for 10%).
+        volatility_pct: Volatility to price with, as a percentage.
+
+    Returns:
+        dict with keys: iv (the input volatility_pct, echoed back), delta,
+        gamma, amplitude_pct (fraction of the theoretical price) — or
+        all-zero values if inputs are non-positive or the backend can't
+        supply gamma.
+    """
+    if spot <= 0 or dte <= 0 or volatility_pct <= 0:
+        return dict(_ZERO_AMPLITUDE_RESULT)
+
+    bs = mibian.BS([spot, strike, interest_rate_pct, dte], volatility=volatility_pct)
+    price = bs.callPrice if option_type == "CE" else bs.putPrice
+    delta = bs.callDelta if option_type == "CE" else bs.putDelta
+    gamma = bs.gamma
+    if not price or price <= 0 or delta is None or gamma is None:
+        logging.warning(
+            "_amplitude_from_volatility: price/gamma unavailable from active "
+            "greeks backend (%s) — configure [greeks] library = opengreeks "
+            "in configfile.ini", mibian.get_active_backend(),
+        )
+        return {"iv": volatility_pct, "delta": delta or 0.0, "gamma": 0.0, "amplitude_pct": 0.0}
+
+    expected_spot_move = spot * (volatility_pct / 100.0) * math.sqrt(1.0 / 365.0)
+    expected_premium_move = abs(delta) * expected_spot_move + 0.5 * gamma * expected_spot_move ** 2
+    amplitude_pct = expected_premium_move / price
+
+    return {
+        "iv": round(volatility_pct, 2),
+        "delta": round(delta, 4),
+        "gamma": round(gamma, 6),
+        "amplitude_pct": round(amplitude_pct, 4),
+    }
+
+
+def get_expected_amplitude_pct(
+    spot: float,
+    strike: float,
+    dte: float,
+    ltp: float,
+    option_type: str,
+    interest_rate_pct: float,
+) -> dict:
+    """Estimate an option's expected 1-trading-day premium move as a % of LTP.
+
+    Back-solves implied volatility from the option's live LTP and DTE, then
+    delegates to `_amplitude_from_volatility()` for the delta+gamma premium
+    projection. This is a read-only estimation helper for the Amplitude
+    Testbed; it is not wired into live order placement.
+
+    Args:
+        spot: Current underlying price.
+        strike: Option strike price.
+        dte: Days to expiry (calendar days, as consumed by greeks_lib.BS).
+        ltp: Option's last traded price.
+        option_type: "CE" for call, "PE" for put.
+        interest_rate_pct: Risk-free rate as a percentage (e.g. 10 for 10%).
+
+    Returns:
+        dict with keys: iv (percent), delta, gamma, amplitude_pct (fraction
+        of LTP), or all-zero values if LTP/DTE are non-positive or the
+        Greeks computation fails.
+
+    Raises:
+        ValueError: If option_type is not "CE" or "PE".
+    """
+    if option_type not in ("CE", "PE"):
+        raise ValueError(f"option_type must be 'CE' or 'PE', got {option_type!r}")
+
+    if ltp <= 0 or dte <= 0 or spot <= 0:
+        return dict(_ZERO_AMPLITUDE_RESULT)
+
+    try:
+        iv_solver = mibian.BS(
+            [spot, strike, interest_rate_pct, dte],
+            callPrice=ltp if option_type == "CE" else None,
+            putPrice=ltp if option_type == "PE" else None,
+        )
+        implied_vol = iv_solver.impliedVolatility
+        if not implied_vol or implied_vol <= 0:
+            return dict(_ZERO_AMPLITUDE_RESULT)
+    except (ValueError, ZeroDivisionError, ArithmeticError) as e:
+        logging.warning("get_expected_amplitude_pct: IV solve failed: %s", e)
+        return dict(_ZERO_AMPLITUDE_RESULT)
+
+    return _amplitude_from_volatility(spot, strike, dte, option_type, interest_rate_pct, implied_vol)
+
+
+def get_theoretical_amplitude_at_dte(
+    spot: float,
+    strike: float,
+    dte: float,
+    option_type: str,
+    interest_rate_pct: float,
+    volatility_pct: float,
+) -> dict:
+    """Estimate expected 1-day amplitude at a hypothetical DTE, holding IV fixed.
+
+    Used by the Amplitude Testbed to compare "amplitude today" against
+    "amplitude if this same option had `dte` days left, at today's IV" — the
+    baseline that defines the amplitude_multiplier shown in the table. Unlike
+    calling `get_expected_amplitude_pct()` a second time with a different DTE
+    against the *real* LTP (which would back-solve a distorted, incorrect
+    IV — the real LTP embeds the real DTE's time value, not the hypothetical
+    one's), this holds volatility constant and forward-prices the option at
+    the hypothetical DTE instead.
+
+    Args:
+        spot: Current underlying price.
+        strike: Option strike price.
+        dte: Hypothetical days to expiry to evaluate at.
+        option_type: "CE" for call, "PE" for put.
+        interest_rate_pct: Risk-free rate as a percentage (e.g. 10 for 10%).
+        volatility_pct: Volatility to hold fixed, as a percentage (typically
+            the IV already back-solved from the option's real LTP/DTE).
+
+    Returns:
+        dict with keys: iv, delta, gamma, amplitude_pct — see
+        `_amplitude_from_volatility()`.
+
+    Raises:
+        ValueError: If option_type is not "CE" or "PE".
+    """
+    if option_type not in ("CE", "PE"):
+        raise ValueError(f"option_type must be 'CE' or 'PE', got {option_type!r}")
+    return _amplitude_from_volatility(spot, strike, dte, option_type, interest_rate_pct, volatility_pct)
 
 
 # ---------------------------------------------------------------------------
@@ -1505,6 +1659,108 @@ def calculate_gap_from_percentage(current_price: float, gap_percentage: float) -
         float: Absolute gap value rounded to 1 decimal place.
     """
     return round(current_price * gap_percentage, 1)
+
+
+MIN_GAP_POINTS = 0.5
+
+
+def _implied_volatility_for_gap(
+    spot: float,
+    strike: float,
+    dte: float,
+    option_ltp: float,
+    option_type: str,
+) -> float:
+    """Back-solve implied volatility from an option's LTP, falling back to config volatility.
+
+    Mirrors positions_lib._get_implied_volatility() (duplicated here rather than imported
+    to avoid a circular import, since positions_lib already imports from common_lib).
+
+    Args:
+        spot: Current underlying spot price.
+        strike: Option strike price.
+        dte: Days to expiration (already clamped to be > 0).
+        option_ltp: Last traded price of the option.
+        option_type: "ce" for call, "pe" for put.
+
+    Returns:
+        float: Implied volatility as a percentage, or todays_volatility on failure.
+    """
+    if option_ltp < 0.5:
+        return todays_volatility
+    try:
+        args = [spot, strike, interest_rate, dte]
+        if option_type == "ce":
+            iv_calc = mibian.BS(args, callPrice=float(option_ltp))
+        else:
+            iv_calc = mibian.BS(args, putPrice=float(option_ltp))
+        implied_vol = iv_calc.impliedVolatility
+        if implied_vol is None or not (1.0 < implied_vol < 200.0):
+            return todays_volatility
+        return implied_vol
+    except (ValueError, ZeroDivisionError, AttributeError) as exc:
+        logging.debug(
+            "IV back-solve failed for strike %s type %s ltp %s: %s", strike, option_type, option_ltp, exc
+        )
+        return todays_volatility
+
+
+def compute_greeks_based_gap(
+    symbol: str,
+    spot_price: float,
+    option_ltp: float,
+    up_points: float,
+    down_points: float,
+) -> dict[str, float]:
+    """Compute buy/sell gap (absolute premium points) from a hypothetical underlying move.
+
+    Reprices the option at spot+up_points and spot-down_points using IV back-solved from
+    option_ltp (falling back to configfile.ini current_volatility on failure), holding IV
+    and days-to-expiry fixed — same pattern as early_exit_lib.compute_leg().
+
+    Args:
+        symbol: Option trading symbol, e.g. "NIFTY25JUL25000CE".
+        spot_price: Current underlying spot LTP.
+        option_ltp: Current option premium LTP.
+        up_points: Hypothetical upward move in the underlying (points, >= 0).
+        down_points: Hypothetical downward move in the underlying (points, >= 0).
+
+    Returns:
+        dict[str, float]: Dict with "buy_gap" and "sell_gap", each rounded to 1 decimal
+        and floored at MIN_GAP_POINTS.
+
+    Raises:
+        ValueError: If the symbol's instrument details cannot be resolved, or its option
+            type is neither "ce" nor "pe".
+    """
+    instrument_details = get_instrument_details(symbol)
+    strike = instrument_details["strike"]
+    dte = max(instrument_details["days_to_expiry"], 0.0001)
+
+    option_type = get_symbol_type(symbol)
+    if option_type not in ("ce", "pe"):
+        raise ValueError(f"Cannot compute greeks-based gap for non-option symbol {symbol}")
+
+    implied_vol = _implied_volatility_for_gap(spot_price, strike, dte, option_ltp, option_type)
+
+    bs_up = mibian.BS([spot_price + up_points, strike, interest_rate, dte], volatility=implied_vol)
+    bs_down = mibian.BS([spot_price - down_points, strike, interest_rate, dte], volatility=implied_vol)
+
+    if option_type == "ce":
+        price_up = bs_up.callPrice
+        price_down = bs_down.callPrice
+        sell_gap = price_up - option_ltp
+        buy_gap = option_ltp - price_down
+    else:
+        price_up = bs_up.putPrice
+        price_down = bs_down.putPrice
+        sell_gap = price_down - option_ltp
+        buy_gap = option_ltp - price_up
+
+    return {
+        "buy_gap": max(round(buy_gap, 1), MIN_GAP_POINTS),
+        "sell_gap": max(round(sell_gap, 1), MIN_GAP_POINTS),
+    }
 
 
 def update_gaps_from_percentage(execution_price: float) -> None:
@@ -2835,7 +3091,7 @@ def get_nifty_current_quote() -> dict:
 
 
 
-def get_bank_nifty_current_greeks():
+def get_bank_nifty_current_greeks(restrict_days=True):
     global all_instruments
     global todays_volatility
     global interest_rate 
@@ -2874,7 +3130,7 @@ def get_bank_nifty_current_greeks():
                 futures_delta = futures_delta + position['quantity']
                 expiry_map[expiry_date] = expiry_map.get(expiry_date, 0) + position['quantity']
             continue
-        if instrument_details['days_to_expiry'] > delta_calculation_days:   # This will ignore any option instrument which is more than 10 working days ahead.
+        if instrument_details['days_to_expiry'] > delta_calculation_days and restrict_days:   # This will ignore any option instrument which is more than 10 working days ahead.
             continue
 
         #logging.info("Current Positions are ----------------- {}".format(instrument_details))

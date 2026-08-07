@@ -19,27 +19,28 @@ from functools import wraps
 from flask import Flask, request, jsonify, session, render_template, render_template_string, redirect, url_for, send_from_directory
 from werkzeug.security import check_password_hash
 
-# Security extensions (CSRF + rate limiting). Imported defensively so the app
-# still boots on a server where flask-wtf / flask-limiter are not yet
-# installed — protection is simply disabled with a loud warning instead of an
-# ImportError taking down the dashboard.
+# CSRF protection. Imported defensively so the app still boots on a server
+# where flask-wtf is not yet installed — protection is simply disabled with a
+# loud warning instead of an ImportError taking down the dashboard.
 try:
     from flask_wtf.csrf import CSRFProtect, CSRFError, generate_csrf
-    from flask_limiter import Limiter
-    from flask_limiter.util import get_remote_address
     _SECURITY_EXTENSIONS_AVAILABLE = True
 except ImportError as _security_import_error:
     CSRFProtect = None  # type: ignore[assignment,misc]
     CSRFError = None  # type: ignore[assignment,misc]
     generate_csrf = None  # type: ignore[assignment]
-    Limiter = None  # type: ignore[assignment,misc]
-    get_remote_address = None  # type: ignore[assignment]
     _SECURITY_EXTENSIONS_AVAILABLE = False
     logging.warning(
-        "flask-wtf / flask-limiter not installed (%s) — CSRF protection and "
-        "rate limiting are DISABLED. Run: pip install flask-wtf flask-limiter",
+        "flask-wtf not installed (%s) — CSRF protection is DISABLED. "
+        "Run: pip install flask-wtf",
         _security_import_error,
     )
+
+# Shared rate limiter — also used by public-facing blueprints (e.g.
+# cas_tracker) which cannot import this module themselves without a circular
+# import. See rate_limiter.py for why it's bound to this app via init_app()
+# below rather than constructed here.
+from rate_limiter import limiter
 
 from kiteconnect import KiteConnect
 import instrument_cache
@@ -207,6 +208,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("FLASK_COOKIE_SECURE", "false").lower() == "true",
+    # Flask defaults permanent sessions to 31 days — too long for a dashboard
+    # that can place/cancel live trades. session.permanent = True is set on
+    # login, so this bounds how long that session stays valid.
+    PERMANENT_SESSION_LIFETIME=timedelta(days=7),
 )
 
 
@@ -216,32 +221,15 @@ app.config.update(
 # delivered to browser JS via GET /api/csrf-token; the shared fetch/XHR shim in
 # templates/_header_partial.html attaches them as an X-CSRFToken header on all
 # same-origin mutating requests. Classic HTML forms embed {{ csrf_token() }}.
-# The rate limiter has NO default limits — dashboards poll aggressively — and
-# is applied only via explicit decorators on order-affecting endpoints. Both
-# use in-memory state: fine for the single-process waitress deployment, resets
-# on restart (documented limitation for multi-worker setups).
+# The rate limiter (imported from rate_limiter.py, shared with public
+# blueprints) has NO default limits — dashboards poll aggressively — and is
+# applied only via explicit decorators on order-affecting/public endpoints.
+# Both use in-memory state: fine for the single-process waitress deployment,
+# resets on restart (documented limitation for multi-worker setups).
 # ---------------------------------------------------------------------------
-class _NoopLimiter:
-    """Stand-in when flask-limiter is unavailable: decorators become no-ops."""
-
-    def limit(self, *args: Any, **kwargs: Any):  # noqa: ANN201 - decorator factory
-        def decorator(func):  # noqa: ANN001, ANN202
-            return func
-        return decorator
-
-    def exempt(self, obj: Any) -> Any:
-        return obj
-
-
 if _SECURITY_EXTENSIONS_AVAILABLE:
     app.config["WTF_CSRF_TIME_LIMIT"] = None
     csrf = CSRFProtect(app)
-    limiter = Limiter(
-        get_remote_address,
-        app=app,
-        default_limits=[],
-        storage_uri="memory://",
-    )
 
     @app.errorhandler(CSRFError)
     def handle_csrf_error(error: "CSRFError"):  # noqa: ANN201 - Flask handler
@@ -257,10 +245,14 @@ if _SECURITY_EXTENSIONS_AVAILABLE:
         return jsonify({"csrf_token": generate_csrf()})
 else:
     csrf = None
-    limiter = _NoopLimiter()
     # Templates reference {{ csrf_token() }}; keep them rendering when
     # flask-wtf is absent by supplying an empty-string fallback.
     app.jinja_env.globals.setdefault("csrf_token", lambda: "")
+
+# Bind the shared limiter (module-level singleton in rate_limiter.py, already
+# decorating routes in this file and in cas_tracker/blueprint.py) to this
+# app. A no-op if flask-limiter isn't installed — see rate_limiter.py.
+limiter.init_app(app)
 
 # ---------------------------------------------------------------------------
 # Kite session probe cache
@@ -415,6 +407,10 @@ def enforce_auth():
     if request.blueprint == "api_module":
         return
 
+    # Read-only public market data endpoints (used by static pages & public dashboards)
+    if request.method == "GET" and request.path.startswith("/cas_tracker/api/"):
+        return
+
     if 'app_authenticated' not in session:
         # Return JSON 401 for API/XHR calls instead of an HTML login redirect.
         if request.path.startswith("/api/"):
@@ -487,6 +483,12 @@ from position_guard.blueprint import position_guard_bp
 from position_guard.db import init_db as _position_guard_init_db
 app.register_blueprint(position_guard_bp)
 _position_guard_init_db()
+
+
+# Register NIFTY CAS (Closing Auction Session) Tracker Blueprint
+from cas_tracker.blueprint import cas_tracker_bp, init_cas_tracker
+app.register_blueprint(cas_tracker_bp)
+init_cas_tracker()
 
 
 # ---------------------------------------------------------------------------
@@ -893,6 +895,25 @@ def api_monitor_reset():
     _reset_monitor_stats()
     logging.info("API monitor stats reset via dashboard.")
     return jsonify({"status": "ok", "message": "Stats reset."})
+
+
+@app.route("/api/delta_live_snapshot")
+def delta_live_snapshot():
+    """Return the latest live-delta-per-expiry snapshot as JSON.
+
+    Reads the cached state computed by the last APScheduler run (see
+    delta_live_tracker.py) — no live Kite API calls. Covers every
+    underlying/expiry with an open position, independent of whether a
+    wave-extractor process is currently running for it. Protected by the
+    global enforce_auth before-request hook.
+
+    Returns:
+        JSON with keys NIFTY/BANKNIFTY/SENSEX (each {expiry_date: delta}) and
+        updated_at (ISO timestamp string or null).
+    """
+    from delta_live_tracker import get_current_live_delta_snapshot
+
+    return jsonify(get_current_live_delta_snapshot())
 
 
 @app.route("/gtt_monitor/status")
@@ -1630,66 +1651,71 @@ def get_request_token():
     status = request.args.get("status")
     request_token = request.args.get("request_token")
     type_ = request.args.get("type")
-    
+
     if status == "success" and request_token:
-        # Success page that posts message back to opener
-        html = f"""
+        # Success page that posts message back to opener. request_token/status
+        # are attacker-controlled query params — rendered via Jinja auto-escaping
+        # (HTML context) and the `tojson` filter (JS context) rather than raw
+        # f-string interpolation, mirroring the safe pattern already used by the
+        # /login route above. Do not switch this back to an f-string.
+        return render_template_string("""
         <html>
         <head><title>Auth Success</title></head>
         <body style="background:#e8f5e9; font-family:sans-serif; text-align:center; padding-top:50px;">
             <h2 style="color:green;">Authentication Successful!</h2>
             <p>You can close this window now.</p>
-            
+
             <div onclick="copyToken()" title="Click to Copy" style="
-                cursor: pointer; 
-                background: #fff; 
-                padding: 15px 30px; 
-                border-radius: 8px; 
-                border: 2px dashed #4CAF50; 
-                display: inline-block; 
+                cursor: pointer;
+                background: #fff;
+                padding: 15px 30px;
+                border-radius: 8px;
+                border: 2px dashed #4CAF50;
+                display: inline-block;
                 margin: 20px;
                 transition: all 0.2s;
                 box-shadow: 0 2px 5px rgba(0,0,0,0.1);
             " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
-                <div style="font-size: 24px; font-weight: bold; color: #333; letter-spacing: 1px;">{request_token}</div>
+                <div style="font-size: 24px; font-weight: bold; color: #333; letter-spacing: 1px;">{{ request_token }}</div>
                 <div style="font-size: 12px; color: #888; margin-top: 5px;">CLICK TO COPY</div>
             </div>
 
             <script>
-                function copyToken() {{
+                var token = {{ request_token | tojson }};
+
+                function copyToken() {
                     const el = document.createElement('textarea');
-                    el.value = '{request_token}';
+                    el.value = token;
                     document.body.appendChild(el);
                     el.select();
                     document.execCommand('copy');
                     document.body.removeChild(el);
-                    
+
                     // Visual feedback
                     const div = document.querySelector('div[onclick]');
                     const originalBg = div.style.backgroundColor;
                     div.style.backgroundColor = '#dcedc8'; // Light green
                     setTimeout(() => div.style.backgroundColor = '#fff', 300);
-                }}
+                }
 
-                // Send token to parent window
-                if(window.opener) {{
-                    window.opener.postMessage({{
+                // Send token to parent window (same-origin only — never a wildcard)
+                if (window.opener) {
+                    window.opener.postMessage({
                         type: 'ZERODHA_TOKEN',
-                        token: '{request_token}'
-                    }}, '*');
-                    
+                        token: token
+                    }, window.location.origin);
+
                     // Close self after short delay
-                    setTimeout(function() {{
+                    setTimeout(function() {
                         window.close();
-                    }}, 1500);
-                }}
+                    }, 1500);
+                }
             </script>
         </body>
         </html>
-        """
-        return html
+        """, request_token=request_token)
     else:
-        return f"<h3>Authentication Failed or Cancelled. Status: {status}</h3>"
+        return render_template_string("<h3>Authentication Failed or Cancelled. Status: {{ status }}</h3>", status=status)
 
 _SCRAPER_SCRIPT_NAME = "ticker_single_scraper_new.py"
 
@@ -2208,6 +2234,18 @@ def _set_kite_session(access_token: str):
     except Exception as e:
         logging.error(f"Failed to auto-save Kite token to DB: {e}")
 
+    # Authenticate the shared common_lib.kite singleton. Modules that call
+    # common_lib.kite / common_lib.get_nifty_current_quote() directly
+    # (cas_tracker, iv_spike_tracker, ticker.py, etc.) rely on this object —
+    # it is otherwise never given an access_token under flask_app.py, since
+    # every other consumer (get_kite_client(), the per-engine clients below)
+    # builds its own separate MonitoredKite instance instead of touching it.
+    try:
+        from common_lib import kite as _shared_kite
+        _shared_kite.set_access_token(access_token)
+    except Exception:
+        logging.exception("Failed to authenticate shared common_lib.kite singleton after login")
+
 
 def _get_restored_kite_token() -> Optional[str]:
     """Attempt to restore the Kite access_token from the server-side DB."""
@@ -2330,6 +2368,193 @@ def wave_extractor_live_positions():
         return jsonify({"positions": {}, "error": str(exc)})
 
 
+@app.route("/api/wave_extractor/amplitude_expiries", methods=["GET"])
+def wave_extractor_amplitude_expiries():
+    """Return upcoming expiry dates for the given underlying (testbed dropdown).
+
+    Query Args:
+        underlying: "NIFTY", "BANKNIFTY", or "SENSEX".
+
+    Returns:
+        JSON {"expiries": [<YYYY-MM-DD>, ...]}.
+    """
+    underlying = request.args.get("underlying", "")
+    if underlying not in ("NIFTY", "BANKNIFTY", "SENSEX"):
+        return jsonify({"error": "Invalid underlying", "expiries": []}), 400
+    expiries = instrument_cache.get_upcoming_expiries(underlying, count=12)
+    return jsonify({"expiries": expiries})
+
+
+@app.route("/api/wave_extractor/amplitude_table", methods=["GET"])
+def wave_extractor_amplitude_table():
+    """Compute the Amplitude Testbed's per-strike theoretical gap table.
+
+    Read-only preview — never places or modifies any order and never touches
+    a running scraper instance. See WAVE_EXTRACTOR.md for the amplitude
+    formula's rationale.
+
+    Rows come from either your currently-held open positions for the given
+    underlying/expiry (default), or the full option chain for that expiry
+    when ``positions_only=false``. DTE is holiday-aware (see
+    ``instrument_cache.get_trading_days_to_expiry()``), not a naive Mon-Fri
+    count.
+
+    Each row returns raw fields (iv, delta, gamma, amplitude_pct,
+    reference_amplitude_pct) — ``correction_multiplier`` and
+    ``hard_floor_pct``/ceiling are intentionally NOT applied server-side so
+    the frontend can recompute suggested gaps instantly on knob changes
+    without a new network round-trip. ``reference_dte`` DOES require a new
+    call, since it changes the Greeks computation itself.
+
+    Query Args:
+        underlying: "NIFTY", "BANKNIFTY", or "SENSEX".
+        expiry: Expiry date string in YYYY-MM-DD format.
+        positions_only: "true" (default) or "false".
+        reference_dte: Optional hypothetical DTE baseline for
+            amplitude_multiplier. When omitted, auto-derived as the trading
+            days between the previous expiry and this one — i.e. this
+            expiry's own full cycle length at issuance — via
+            ``instrument_cache.get_previous_expiry()``. Falls back to the
+            current DTE (multiplier ≈ 1) if there is no earlier expiry on
+            record.
+
+    Returns:
+        JSON {"rows": [...], "dte": ..., "spot": ..., "reference_dte": ...}
+        or {"error": ...}. Each row has: tradingsymbol, strike, option_type,
+        qty (only when positions_only), spot, ltp, dte, iv, delta, gamma,
+        amplitude_pct, reference_amplitude_pct, amplitude_multiplier.
+    """
+    underlying = request.args.get("underlying", "")
+    expiry = request.args.get("expiry", "")
+    positions_only = request.args.get("positions_only", "true").lower() != "false"
+    reference_dte_override = request.args.get("reference_dte", type=float)
+    if underlying not in ("NIFTY", "BANKNIFTY", "SENSEX") or not expiry:
+        return jsonify({"error": "Invalid parameters"}), 400
+
+    import common_lib
+
+    expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+
+    dte = max(instrument_cache.get_trading_days_to_expiry(expiry_date), 0.0001)
+
+    if reference_dte_override is not None:
+        reference_dte = max(reference_dte_override, 0.0001)
+    else:
+        # instruments.db only ever holds current/future expiries (Kite's live
+        # dump drops expired contracts), so the previous expiry is reliably
+        # absent for the nearest expiry — use the NEXT expiry's spacing as
+        # the cycle-length proxy instead (weeklies/monthlies have a
+        # consistent cadence, so this is equivalent in magnitude).
+        next_expiry = instrument_cache.get_next_expiry(underlying, expiry)
+        if next_expiry:
+            next_expiry_date = datetime.strptime(next_expiry, "%Y-%m-%d").date()
+            reference_dte = max(
+                instrument_cache.get_trading_days_to_expiry(
+                    next_expiry_date, from_date=expiry_date + timedelta(days=1)
+                ),
+                0.0001,
+            )
+        else:
+            # No further expiry on record (e.g. the furthest one synced) —
+            # fall back to this expiry's own DTE, so amplitude_multiplier ≈ 1.
+            reference_dte = dte
+
+    try:
+        kite = get_authenticated_kite_client({})
+    except RuntimeError as auth_err:
+        return jsonify({"error": f"Not authenticated — please reconnect Kite: {auth_err}"}), 401
+
+    # Resolve the row set: either held positions or the full chain.
+    rows_meta: list[dict] = []
+    if positions_only:
+        try:
+            net_positions = kite.positions().get("net", [])
+        except Exception as exc:
+            logging.error("wave_extractor_amplitude_table: positions fetch failed: %s", exc, exc_info=True)
+            return jsonify({"error": f"Could not fetch positions: {exc}"}), 502
+        for pos in net_positions:
+            if pos.get("quantity", 0) == 0:
+                continue
+            inst = instrument_cache.get_instrument_by_token(pos.get("instrument_token"))
+            if not inst or inst.get("name") != underlying:
+                continue
+            if str(inst.get("expiry")) != expiry or inst.get("instrument_type") not in ("CE", "PE"):
+                continue
+            rows_meta.append({
+                "tradingsymbol": inst["tradingsymbol"],
+                "exchange": inst["exchange"],
+                "strike": inst["strike"],
+                "option_type": inst["instrument_type"],
+                "qty": pos["quantity"],
+            })
+    else:
+        for inst in instrument_cache.get_option_chain_for_expiry(underlying, expiry):
+            rows_meta.append({
+                "tradingsymbol": inst["tradingsymbol"],
+                "exchange": inst["exchange"],
+                "strike": inst["strike"],
+                "option_type": inst["instrument_type"],
+                "qty": None,
+            })
+
+    if not rows_meta:
+        return jsonify({"rows": [], "reference_dte": reference_dte})
+
+    spot_key = common_lib._get_spot_symbol_for(underlying)
+    quote_keys = [f"{r['exchange']}:{r['tradingsymbol']}" for r in rows_meta]
+    if spot_key:
+        quote_keys.append(spot_key)
+
+    try:
+        quotes = kite.quote(quote_keys)
+        spot = quotes[spot_key]["last_price"] if spot_key else None
+    except Exception as exc:
+        logging.error("wave_extractor_amplitude_table: quote fetch failed: %s", exc, exc_info=True)
+        return jsonify({"error": f"Could not fetch live quotes: {exc}"}), 502
+
+    if not spot:
+        return jsonify({"error": f"Could not resolve spot price for {underlying}"}), 502
+
+    rows = []
+    for meta in rows_meta:
+        quote_key = f"{meta['exchange']}:{meta['tradingsymbol']}"
+        ltp = quotes.get(quote_key, {}).get("last_price")
+        if not ltp:
+            continue
+
+        result = common_lib.get_expected_amplitude_pct(
+            spot=spot, strike=meta["strike"], dte=dte, ltp=ltp,
+            option_type=meta["option_type"], interest_rate_pct=common_lib.interest_rate,
+        )
+        reference_result = common_lib.get_theoretical_amplitude_at_dte(
+            spot=spot, strike=meta["strike"], dte=reference_dte,
+            option_type=meta["option_type"], interest_rate_pct=common_lib.interest_rate,
+            volatility_pct=result["iv"] or 15.0,
+        )
+        reference_amplitude_pct = reference_result["amplitude_pct"] or result["amplitude_pct"]
+        amplitude_multiplier = (
+            result["amplitude_pct"] / reference_amplitude_pct if reference_amplitude_pct else 1.0
+        )
+
+        rows.append({
+            "tradingsymbol": meta["tradingsymbol"],
+            "strike": meta["strike"],
+            "option_type": meta["option_type"],
+            "qty": meta["qty"],
+            "spot": spot,
+            "ltp": ltp,
+            "dte": dte,
+            "iv": result["iv"],
+            "delta": result["delta"],
+            "gamma": result["gamma"],
+            "amplitude_pct": result["amplitude_pct"],
+            "reference_amplitude_pct": reference_amplitude_pct,
+            "amplitude_multiplier": round(amplitude_multiplier, 3),
+        })
+
+    return jsonify({"rows": rows, "dte": dte, "spot": spot, "reference_dte": reference_dte})
+
+
 @app.route("/api/wave_extractor/update_prices", methods=["POST"])
 def update_wave_extractor_prices():
     """
@@ -2450,6 +2675,93 @@ def wave_extractor_config_api():
     except Exception as exc:
         logging.error("wave_extractor/config POST error: %s", exc)
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/wave_extractor/suggest_gaps", methods=["POST"])
+def wave_extractor_suggest_gaps():
+    """Suggest buy/sell gap (absolute premium points) per symbol via greeks reprice.
+
+    For each requested symbol, looks up the per-underlying "gap_move_points"
+    (up/down) from wave_extractor_config.json. If configured, reprices the
+    option at spot+up/spot-down via common_lib.compute_greeks_based_gap() to
+    derive buy_gap/sell_gap. If not configured for that underlying, the
+    result is marked "fallback" so the frontend keeps its existing 25%
+    smart-gap behavior for that symbol. The option's live LTP is always
+    included (when the quote fetch succeeds) so the frontend can also use
+    this endpoint to drive the percent-based gap mechanism.
+
+    Request JSON:
+        symbols (list[str]): option trading symbols, e.g. ["NIFTY25JUL25000CE"].
+
+    Returns:
+        JSON {"results": {symbol: {"buy_gap": float, "sell_gap": float, "source": "greeks", "ltp": float}
+                           | {"source": "fallback", "ltp": float, "reason": str}
+                           | {"source": "error", "reason": str}}}
+    """
+    import common_lib as _cl
+
+    data = request.json or {}
+    symbols = data.get("symbols", [])
+    if not symbols:
+        return jsonify({"error": "'symbols' must be a non-empty list"}), 400
+
+    if "access_token" not in session:
+        return jsonify({"error": "Session expired. Please authenticate first."}), 401
+
+    kite = get_kite_client()
+    _cl.reload_wave_extractor_config()
+
+    symbols_by_underlying: dict[str, list[str]] = {}
+    for symbol in symbols:
+        underlying = _cl._get_underlying_name(symbol)
+        symbols_by_underlying.setdefault(underlying, []).append(symbol)
+
+    results: dict = {}
+    for underlying, underlying_symbols in symbols_by_underlying.items():
+        move_points = _cl._we_config_cache.get(underlying, {}).get("gap_move_points")
+        exchange_prefix = "BFO:" if underlying == "SENSEX" else "NFO:"
+
+        try:
+            option_quotes = kite.quote([exchange_prefix + s for s in underlying_symbols])
+        except Exception as exc:
+            logging.error("suggest_gaps: option quote fetch failed for %s: %s", underlying, exc)
+            for symbol in underlying_symbols:
+                results[symbol] = {"source": "error", "reason": f"quote fetch failed: {exc}"}
+            continue
+
+        if not move_points:
+            for symbol in underlying_symbols:
+                option_ltp = option_quotes.get(exchange_prefix + symbol, {}).get("last_price", 0)
+                results[symbol] = {
+                    "source": "fallback",
+                    "ltp": option_ltp,
+                    "reason": f"no gap_move_points configured for {underlying}",
+                }
+            continue
+
+        up_points = float(move_points.get("up", 0))
+        down_points = float(move_points.get("down", 0))
+        spot_symbol = SPOT_SYMBOL_MAP.get(underlying)
+
+        try:
+            spot_quote = kite.quote(spot_symbol)
+            spot_price = spot_quote[spot_symbol]["last_price"]
+        except Exception as exc:
+            logging.error("suggest_gaps: spot quote fetch failed for %s: %s", underlying, exc)
+            for symbol in underlying_symbols:
+                results[symbol] = {"source": "error", "reason": f"spot quote fetch failed: {exc}"}
+            continue
+
+        for symbol in underlying_symbols:
+            option_ltp = option_quotes.get(exchange_prefix + symbol, {}).get("last_price", 0)
+            try:
+                gaps = _cl.compute_greeks_based_gap(symbol, spot_price, option_ltp, up_points, down_points)
+                results[symbol] = {**gaps, "source": "greeks", "ltp": option_ltp}
+            except Exception as exc:
+                logging.error("suggest_gaps: greeks calc failed for %s: %s", symbol, exc)
+                results[symbol] = {"source": "error", "reason": str(exc)}
+
+    return jsonify({"results": results})
 
 
 # ============================================================================
@@ -3480,6 +3792,16 @@ def get_expiry_trade_support_resistance():
     if system is None:
         return jsonify({"support_resistance": []})
     return jsonify({"support_resistance": system.get_support_resistance()})
+
+
+@app.route("/nifty_contributors")
+def nifty_contributors_dashboard():
+    """Render the NIFTY 50 stock contributors dashboard page.
+
+    Returns:
+        Rendered HTML page.
+    """
+    return render_template("nifty_contributors.html")
 
 
 # ============================================================================

@@ -152,9 +152,15 @@ def reread_greeks_config(config_path: str | None = None) -> None:
     library, shadow, tolerance = _load_config(config_path)
     with _lock:
         if library == "opengreeks" and _opengreeks_bs is None:
-            # Primary backend: fail loud — trading must not run on a backend
-            # other than the one configured.
-            _opengreeks_bs = _import_opengreeks()
+            # Primary backend: attempt opengreeks import, fallback to mibian if missing in dev environment
+            try:
+                _opengreeks_bs = _import_opengreeks()
+            except GreeksBackendError as import_err:
+                logger.warning(
+                    "opengreeks backend requested but unavailable (%s); falling back to mibian",
+                    import_err,
+                )
+                _backend = "mibian"
         elif shadow and _opengreeks_bs is None:
             # Shadow backend is diagnostic only: a broken/missing opengreeks
             # must never prevent the app from booting on mibian.

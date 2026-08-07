@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NIFTY CAS Tracker</title>
+<style>
+    :root {
+        --bg: #0f1115;
+        --panel: #171a21;
+        --border: #2a2e38;
+        --text: #e6e9ef;
+        --muted: #8b93a3;
+        --green: #2ecc71;
+        --red: #e74c3c;
+        --amber: #f5a623;
+        --accent: #4a9eff;
+    }
+    * { box-sizing: border-box; }
+    body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        padding: 20px;
+    }
+    h1 { font-size: 20px; margin: 0 0 4px 0; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    .clock { font-size: 13px; color: var(--muted); text-align: right; }
+    .clock span { color: var(--text); font-variant-numeric: tabular-nums; }
+    .banner {
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 16px;
+        border: 1px solid var(--border);
+    }
+    .banner.waiting { background: #1e2430; color: var(--amber); }
+    .banner.live { background: #10281c; color: var(--green); }
+    .banner.closed { background: #1e2430; color: var(--muted); }
+    .stats {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+    .stat-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 16px;
+        min-width: 140px;
+    }
+    .stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .stat-card .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+    .controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 14px;
+    }
+    .controls label { font-size: 12px; color: var(--muted); }
+    select, input[type=text], button {
+        background: #0d0f14;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font-size: 13px;
+    }
+    button {
+        background: var(--accent);
+        color: #06121f;
+        font-weight: 600;
+        cursor: pointer;
+        border: none;
+    }
+    button.secondary { background: #232733; color: var(--text); }
+    button:hover { opacity: 0.9; }
+    input[type=search] {
+        background: #0d0f14;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font-size: 13px;
+        width: 160px;
+    }
+    .table-wrap {
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+    }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    thead th {
+        position: sticky;
+        top: 0;
+        background: #1c202a;
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+        cursor: pointer;
+        user-select: none;
+    }
+    thead th:hover { color: var(--accent); }
+    tbody td {
+        padding: 6px 10px;
+        border-bottom: 1px solid #1d212b;
+        white-space: nowrap;
+    }
+    tbody tr:hover { background: #1a1e27; }
+    .empty-state {
+        padding: 40px 20px;
+        text-align: center;
+        color: var(--muted);
+    }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    .section-heading {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 28px 0 10px 0;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+    }
+    .section-sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; margin-top: -6px; }
+    .chart-wrap { position: relative; user-select: none; }
+    .chart-tooltip {
+        position: absolute;
+        pointer-events: none;
+        background: #1c202a;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        line-height: 1.5;
+        color: var(--text);
+        z-index: 10;
+        white-space: nowrap;
+    }
+    .hint { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .chart-loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 17, 21, 0.6);
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 600;
+        z-index: 20;
+        border-radius: 8px;
+    }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <div>
+        <h1>NIFTY CAS Tracker</h1>
+        <div class="subtitle">Closing Auction Session — indicative price &amp; volume, F&amp;O universe</div>
+    </div>
+    <div style="text-align:right;">
+        <div class="clock">IST time: <span id="ist-clock">--:--:--</span></div>
+        <a href="/cas_tracker/order_tracker" style="color: var(--accent); font-size: 13px; text-decoration: none;">Order Book Tracker &rarr;</a>
+    </div>
+</div>
+
+<div id="banner" class="banner waiting">Loading...</div>
+
+<div class="stats">
+    <div class="stat-card"><div class="label">Eligible Symbols</div><div class="value" id="stat-symbols">-</div></div>
+    <div class="stat-card"><div class="label">Active Rows</div><div class="value" id="stat-rows">-</div></div>
+    <div class="stat-card"><div class="label">Total Value (Cr)</div><div class="value" id="stat-value">-</div></div>
+    <div class="stat-card"><div class="label">Total Quantity</div><div class="value" id="stat-qty">-</div></div>
+    <div class="stat-card"><div class="label">Last Updated</div><div class="value" id="stat-updated">-</div></div>
+</div>
+
+<div class="stats">
+    <div class="stat-card"><div class="label">NIFTY Estimate (reconstructed)</div><div class="value" id="stat-nifty-est">-</div></div>
+    <div class="stat-card"><div class="label">Live NSE NIFTY</div><div class="value" id="stat-nifty-live">-</div></div>
+    <div class="stat-card"><div class="label">Diff</div><div class="value" id="stat-nifty-diff">-</div></div>
+    <div class="stat-card"><div class="label">Weighted Return</div><div class="value" id="stat-weighted-return">-</div></div>
+    <div class="stat-card"><div class="label">Coverage</div><div class="value" id="stat-coverage">-</div></div>
+</div>
+
+<div class="section-heading" style="margin-top:0; padding-top:0; border-top:none;">NIFTY CAS Chart</div>
+<div class="section-sub" id="candle-sub">Reconstructed NIFTY (from CAS auction data) aggregated into 1-minute OHLC candles for today's session.</div>
+<div class="controls">
+    <label>Chart type:</label>
+    <select id="chart-type">
+        <option value="candles">Candles (1-min)</option>
+        <option value="line">Line (raw ticks)</option>
+    </select>
+    <label>Date:</label>
+    <select id="chart-date"></select>
+    <span class="hint">Hover for details</span>
+</div>
+<div class="table-wrap chart-wrap" style="padding: 10px;">
+    <svg id="candle-chart" width="100%" height="380" viewBox="0 0 900 380" preserveAspectRatio="none"></svg>
+    <div id="chart-tooltip" class="chart-tooltip" style="display:none;"></div>
+    <div id="chart-loading" class="chart-loading" style="display:none;">Loading&hellip;</div>
+</div>
+
+<div class="section-heading">NIFTY CAS Data</div>
+<div class="controls">
+    <label>Mode:</label>
+    <button id="btn-live" class="secondary">Live</button>
+    <button id="btn-replay" class="secondary">Replay</button>
+    <span id="replay-controls" style="display:none">
+        <label>Date:</label>
+        <select id="replay-date"></select>
+        <label>At:</label>
+        <input type="text" id="replay-time" value="15:20:00" size="8">
+        <button id="btn-load-replay">Load</button>
+    </span>
+    <label style="margin-left:auto">Filter:</label>
+    <input type="search" id="filter" placeholder="Symbol contains...">
+</div>
+
+<div class="table-wrap">
+    <table>
+        <thead><tr id="table-head"></tr></thead>
+        <tbody id="table-body"><tr><td class="empty-state">Loading...</td></tr></tbody>
+    </table>
+</div>
+
+<div class="section-heading">Per-Stock Drill-Down</div>
+<div class="section-sub">Every recorded data point for one NIFTY 50 stock across the day.</div>
+<div class="controls">
+    <label>Stock:</label>
+    <select id="stock-select">
+        <option value="">-- select a stock --</option>
+        {% for sym in nifty50_symbols %}
+        <option value="{{ sym }}">{{ sym }}</option>
+        {% endfor %}
+    </select>
+    <button id="btn-refresh-stock" class="secondary">Refresh</button>
+    <span class="hint" id="stock-history-count"></span>
+</div>
+<div class="table-wrap" style="max-height: 500px; overflow-y: auto;">
+    <table>
+        <thead><tr id="stock-history-head"></tr></thead>
+        <tbody id="stock-history-body"><tr><td class="empty-state">Select a stock above to load its history.</td></tr></tbody>
+    </table>
+</div>
+
+<div class="section-heading">Live NIFTY Replication Check (regular market hours)</div>
+<div class="section-sub">Reconstructs NIFTY from live constituent prices (not CAS data) to validate the weighting/formula logic, any time the market is open. Updates every few seconds.</div>
+<div id="live-check-banner" class="banner waiting">Loading...</div>
+<div class="stats">
+    <div class="stat-card"><div class="label">Reconstructed NIFTY</div><div class="value" id="lc-estimate">-</div></div>
+    <div class="stat-card"><div class="label">Live NSE NIFTY</div><div class="value" id="lc-live">-</div></div>
+    <div class="stat-card"><div class="label">Diff</div><div class="value" id="lc-diff">-</div></div>
+    <div class="stat-card"><div class="label">Weighted Return</div><div class="value" id="lc-return">-</div></div>
+    <div class="stat-card"><div class="label">Coverage</div><div class="value" id="lc-coverage">-</div></div>
+    <div class="stat-card"><div class="label">Last Updated</div><div class="value" id="lc-updated">-</div></div>
+</div>
+<div class="table-wrap">
+    <table>
+        <thead><tr><th>Symbol</th><th>Weight %</th><th>Prev Close</th><th>LTP</th><th>Return %</th><th>Contribution %</th></tr></thead>
+        <tbody id="lc-breakdown-body"><tr><td class="empty-state">Loading...</td></tr></tbody>
+    </table>
+</div>
+
+<script>
+let mode = 'live';
+let lastPayload = null;
+let sortKey = 'Value Traded (₹)';
+let sortAsc = false;
+
+function pad(n) { return n.toString().padStart(2, '0'); }
+
+function updateClock() {
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    document.getElementById('ist-clock').textContent =
+        `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}
+
+// CAS data (live snapshot + today's chart) never changes outside 15:10-15:40
+// IST, so the recurring polls below skip the network call entirely outside
+// that window instead of hammering the backend (and its Kite-backed anchor
+// lookup) once a second from a tab left open all day.
+function isWithinCasWindow() {
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const minutesSinceMidnight = now.getHours() * 60 + now.getMinutes();
+    return minutesSinceMidnight >= 910 && minutesSinceMidnight <= 940;
+}
+
+function setBanner(state, text) {
+    const el = document.getElementById('banner');
+    el.className = 'banner ' + state;
+    el.textContent = text;
+}
+
+function renderTable(rows) {
+    const head = document.getElementById('table-head');
+    const body = document.getElementById('table-body');
+
+    if (!rows || rows.length === 0) {
+        head.innerHTML = '';
+        body.innerHTML = '<tr><td class="empty-state">No active rows yet — CAS order book populates during the 15:15–15:35 IST window.</td></tr>';
+        return;
+    }
+
+    // Add computed columns (not present in NSE's raw payload) before the
+    // dynamic column list is derived, so they sort/filter/render exactly
+    // like every other column.
+    const enriched = rows.map(row => {
+        const totTradedQty = parseFloat(row.totTradedQty) || 0;
+        const finalPrice = parseFloat(row.finalPrice) || 0;
+        const openPrice = parseFloat(row.openPrice) || 0;
+        const changePct = (openPrice && finalPrice) ? ((finalPrice - openPrice) / openPrice) * 100 : null;
+        return {
+            ...row,
+            'Value Traded (₹)': Math.round(totTradedQty * finalPrice),
+            'Chg vs Open %': changePct !== null ? changePct.toFixed(2) : null,
+        };
+    });
+
+    const filterText = document.getElementById('filter').value.trim().toUpperCase();
+    let filtered = enriched;
+    const symbolKey = Object.keys(enriched[0]).find(k => k.toLowerCase() === 'symbol') || Object.keys(enriched[0])[0];
+    if (filterText) {
+        filtered = enriched.filter(r => String(r[symbolKey] || '').toUpperCase().includes(filterText));
+    }
+
+    const columns = Object.keys(enriched[0]);
+
+    if (sortKey && columns.includes(sortKey)) {
+        filtered = [...filtered].sort((a, b) => {
+            const av = a[sortKey], bv = b[sortKey];
+            const an = parseFloat(av), bn = parseFloat(bv);
+            let cmp;
+            if (!isNaN(an) && !isNaN(bn)) cmp = an - bn;
+            else cmp = String(av).localeCompare(String(bv));
+            return sortAsc ? cmp : -cmp;
+        });
+    }
+
+    head.innerHTML = columns.map(c =>
+        `<th data-col="${c}">${c}${sortKey === c ? (sortAsc ? ' ▲' : ' ▼') : ''}</th>`
+    ).join('');
+
+    body.innerHTML = filtered.map(row => {
+        return '<tr>' + columns.map(c => {
+            const raw = row[c];
+            if (raw === null || raw === undefined) return '<td></td>';
+            if (c === 'Value Traded (₹)') {
+                return `<td>${Number(raw).toLocaleString('en-IN')}</td>`;
+            }
+            if (c === 'Chg vs Open %') {
+                const num = parseFloat(raw);
+                const cls = num >= 0 ? 'pos' : 'neg';
+                return `<td><span class="${cls}">${num >= 0 ? '+' : ''}${raw}%</span></td>`;
+            }
+            return `<td>${raw}</td>`;
+        }).join('') + '</tr>';
+    }).join('');
+
+    head.querySelectorAll('th').forEach(th => {
+        th.addEventListener('click', () => {
+            const col = th.dataset.col;
+            if (sortKey === col) sortAsc = !sortAsc;
+            else { sortKey = col; sortAsc = true; }
+            renderTable(rows);
+        });
+    });
+}
+
+function applyPayload(payload) {
+    lastPayload = payload;
+    document.getElementById('stat-symbols').textContent = (payload.symbols || []).length || '-';
+    document.getElementById('stat-rows').textContent = (payload.data || []).length;
+    document.getElementById('stat-value').textContent = payload.totalValue ?? '-';
+    document.getElementById('stat-qty').textContent = payload.totalQuantity ?? '-';
+    document.getElementById('stat-updated').textContent = payload.timestamp || '-';
+
+    const estEl = document.getElementById('stat-nifty-est');
+    const liveEl = document.getElementById('stat-nifty-live');
+    const diffEl = document.getElementById('stat-nifty-diff');
+    const retEl = document.getElementById('stat-weighted-return');
+    const covEl = document.getElementById('stat-coverage');
+
+    estEl.textContent = payload.nifty_estimate != null ? payload.nifty_estimate.toFixed(2) : '-';
+    liveEl.textContent = payload.nifty_live != null ? payload.nifty_live.toFixed(2) : '-';
+    if (payload.nifty_diff != null) {
+        diffEl.textContent = `${payload.nifty_diff > 0 ? '+' : ''}${payload.nifty_diff} (${payload.nifty_diff_pct}%)`;
+        diffEl.className = 'value ' + (payload.nifty_diff >= 0 ? 'pos' : 'neg');
+    } else {
+        diffEl.textContent = '-';
+        diffEl.className = 'value';
+    }
+    if (payload.weighted_return_pct != null) {
+        retEl.textContent = `${payload.weighted_return_pct > 0 ? '+' : ''}${payload.weighted_return_pct}%`;
+        retEl.className = 'value ' + (payload.weighted_return_pct >= 0 ? 'pos' : 'neg');
+    } else {
+        retEl.textContent = '-';
+        retEl.className = 'value';
+    }
+    covEl.textContent = payload.matched_constituents != null
+        ? `${payload.matched_constituents}/${payload.total_constituents} (${payload.coverage_pct}%)`
+        : '-';
+
+    if (mode === 'live') {
+        if (payload.in_window) {
+            setBanner('live', (payload.data || []).length > 0
+                ? 'CAS window is LIVE — updating every second'
+                : 'CAS window is open — waiting for the first order book print');
+        } else {
+            setBanner('waiting', 'Waiting for CAS window (15:15–15:35 IST). Showing last known state.');
+        }
+    } else {
+        setBanner('closed', `Replay mode — showing snapshot at ${payload.timestamp || 'n/a'}`);
+    }
+
+    renderTable(payload.data || []);
+}
+
+async function fetchLive() {
+    try {
+        const res = await fetch('/cas_tracker/api/latest');
+        const payload = await res.json();
+        applyPayload(payload);
+    } catch (e) {
+        setBanner('waiting', 'Error fetching live data: ' + e);
+    }
+}
+
+async function loadDates() {
+    try {
+        const res = await fetch('/cas_tracker/api/dates');
+        const payload = await res.json();
+        const sel = document.getElementById('replay-date');
+        sel.innerHTML = (payload.dates || []).map(d => `<option value="${d}">${d}</option>`).join('');
+    } catch (e) { /* no-op if dates fail to load */ }
+}
+
+async function fetchReplay() {
+    const date = document.getElementById('replay-date').value;
+    const at = document.getElementById('replay-time').value || '15:20:00';
+    if (!date) { setBanner('closed', 'No recorded dates available yet.'); return; }
+    try {
+        const res = await fetch(`/cas_tracker/api/replay?date=${encodeURIComponent(date)}&at=${encodeURIComponent(at)}`);
+        const payload = await res.json();
+        if (res.status !== 200) { setBanner('closed', payload.error || 'Replay failed'); return; }
+        applyPayload(payload);
+    } catch (e) {
+        setBanner('closed', 'Error fetching replay data: ' + e);
+    }
+}
+
+document.getElementById('btn-live').addEventListener('click', () => {
+    mode = 'live';
+    document.getElementById('replay-controls').style.display = 'none';
+    fetchLive();
+});
+document.getElementById('btn-replay').addEventListener('click', async () => {
+    mode = 'replay';
+    document.getElementById('replay-controls').style.display = 'inline';
+    await loadDates();
+    fetchReplay();
+});
+document.getElementById('btn-load-replay').addEventListener('click', fetchReplay);
+document.getElementById('filter').addEventListener('input', () => {
+    if (lastPayload) renderTable(lastPayload.data || []);
+});
+
+setInterval(updateClock, 1000);
+updateClock();
+
+setInterval(() => { if (mode === 'live' && isWithinCasWindow()) fetchLive(); }, 1000);
+fetchLive();
+
+function renderBreakdown(rows) {
+    const body = document.getElementById('lc-breakdown-body');
+    if (!rows || rows.length === 0) {
+        body.innerHTML = '<tr><td class="empty-state">No breakdown yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => `<tr>
+        <td>${r.symbol}</td>
+        <td>${r.weight_pct}</td>
+        <td>${r.prev_close}</td>
+        <td>${r.ltp}</td>
+        <td class="${r.return_pct >= 0 ? 'pos' : 'neg'}">${r.return_pct}</td>
+        <td class="${r.contribution_pct >= 0 ? 'pos' : 'neg'}">${r.contribution_pct}</td>
+    </tr>`).join('');
+}
+
+async function fetchLiveCheck() {
+    try {
+        const res = await fetch('/cas_tracker/api/live_check');
+        const payload = await res.json();
+        const banner = document.getElementById('live-check-banner');
+
+        if (!payload.ready) {
+            banner.className = 'banner waiting';
+            banner.textContent = payload.message || 'Waiting for first poll...';
+            return;
+        }
+
+        banner.className = 'banner ' + (payload.in_market_hours ? 'live' : 'waiting');
+        banner.textContent = payload.in_market_hours
+            ? 'Market is open — reconstructing NIFTY from live constituent prices'
+            : 'Market is closed — showing last computed snapshot';
+
+        document.getElementById('lc-estimate').textContent = payload.nifty_estimate != null ? payload.nifty_estimate.toFixed(2) : '-';
+        document.getElementById('lc-live').textContent = payload.nifty_live != null ? payload.nifty_live.toFixed(2) : '-';
+        const diffEl = document.getElementById('lc-diff');
+        if (payload.nifty_diff != null) {
+            diffEl.textContent = `${payload.nifty_diff > 0 ? '+' : ''}${payload.nifty_diff} (${payload.nifty_diff_pct}%)`;
+            diffEl.className = 'value ' + (payload.nifty_diff >= 0 ? 'pos' : 'neg');
+        } else {
+            diffEl.textContent = '-';
+            diffEl.className = 'value';
+        }
+        const retEl = document.getElementById('lc-return');
+        if (payload.weighted_return_pct != null) {
+            retEl.textContent = `${payload.weighted_return_pct > 0 ? '+' : ''}${payload.weighted_return_pct}%`;
+            retEl.className = 'value ' + (payload.weighted_return_pct >= 0 ? 'pos' : 'neg');
+        } else {
+            retEl.textContent = '-';
+        }
+        document.getElementById('lc-coverage').textContent = `${payload.matched_constituents}/${payload.total_constituents} (${payload.coverage_pct}%)`;
+        document.getElementById('lc-updated').textContent = payload.timestamp || '-';
+
+        renderBreakdown(payload.breakdown);
+    } catch (e) {
+        document.getElementById('live-check-banner').textContent = 'Error fetching live check: ' + e;
+    }
+}
+
+setInterval(fetchLiveCheck, 4000);
+fetchLiveCheck();
+
+// ── NIFTY CAS chart: candles+volume or raw-tick line, with hover tooltip ──
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const VIEW_W = 900, VIEW_H = 380;
+
+let chartPayload = null;   // {date, is_absolute, candles, ticks}
+let chartType = 'candles';
+let chartDate = null;      // null = let the backend default to today
+
+function istTodayStr() {
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+function isViewingToday() {
+    return !chartDate || chartDate === istTodayStr();
+}
+
+// Mutable snapshot of the last render's geometry, read by the tooltip's
+// mousemove handler to map a pixel position back to a data index.
+const chartGeom = { series: [], isCandles: true, marginLeft: 60, plotW: 830 };
+
+function getFullSeries() {
+    if (!chartPayload) return [];
+    return chartType === 'candles' ? (chartPayload.candles || []) : (chartPayload.ticks || []);
+}
+
+function indexFromClientX(clientX, svg) {
+    const rect = svg.getBoundingClientRect();
+    const xFrac = (clientX - rect.left) / rect.width;
+    const xPix = xFrac * VIEW_W;
+    const rel = (xPix - chartGeom.marginLeft) / chartGeom.plotW;
+    let idx = Math.floor(rel * chartGeom.series.length);
+    return Math.max(0, Math.min(chartGeom.series.length - 1, idx));
+}
+
+function renderChart() {
+    const svg = document.getElementById('candle-chart');
+    const tooltip = document.getElementById('chart-tooltip');
+    svg.innerHTML = '';
+    tooltip.style.display = 'none';
+
+    if (!chartPayload) return;
+
+    document.getElementById('candle-sub').textContent = chartPayload.is_absolute
+        ? `Reconstructed NIFTY (from CAS auction data) for ${chartPayload.date}.`
+        : `No absolute anchor available for ${chartPayload.date} — showing weighted-return % instead of NIFTY levels.`;
+
+    const fullSeries = getFullSeries();
+    if (!fullSeries.length) {
+        const text = document.createElementNS(SVG_NS, 'text');
+        text.setAttribute('x', VIEW_W / 2); text.setAttribute('y', VIEW_H / 2);
+        text.setAttribute('text-anchor', 'middle'); text.setAttribute('fill', '#8b93a3');
+        text.textContent = 'No data yet — waiting for CAS window data.';
+        svg.appendChild(text);
+        return;
+    }
+
+    const series = fullSeries;
+    const isAbsolute = chartPayload.is_absolute;
+    const isCandles = chartType === 'candles';
+
+    const marginLeft = 60, marginRight = 10, marginBottom = 24, marginTop = 10;
+    const priceH = VIEW_H - marginTop - marginBottom;
+    const plotW = VIEW_W - marginLeft - marginRight;
+
+    chartGeom.series = series;
+    chartGeom.isCandles = isCandles;
+    chartGeom.marginLeft = marginLeft;
+    chartGeom.plotW = plotW;
+
+    const getHigh = item => isCandles ? item.high : item.value;
+    const getLow = item => isCandles ? item.low : item.value;
+    const maxV = Math.max(...series.map(getHigh));
+    const minV = Math.min(...series.map(getLow));
+    const pad = (maxV - minV) * 0.1 || Math.abs(maxV) * 0.01 || 1;
+    const yMax = maxV + pad, yMin = minV - pad;
+
+    const yScale = v => marginTop + priceH * (1 - (v - yMin) / (yMax - yMin));
+    const xScale = i => marginLeft + (plotW * (i + 0.5)) / series.length;
+    const slotW = plotW / series.length;
+
+    for (let i = 0; i <= 4; i++) {
+        const v = yMin + (yMax - yMin) * (i / 4);
+        const y = yScale(v);
+        const line = document.createElementNS(SVG_NS, 'line');
+        line.setAttribute('x1', marginLeft); line.setAttribute('x2', VIEW_W - marginRight);
+        line.setAttribute('y1', y); line.setAttribute('y2', y);
+        line.setAttribute('stroke', '#2a2e38'); line.setAttribute('stroke-width', '1');
+        svg.appendChild(line);
+
+        const label = document.createElementNS(SVG_NS, 'text');
+        label.setAttribute('x', marginLeft - 6);
+        label.setAttribute('y', y + 4);
+        label.setAttribute('text-anchor', 'end');
+        label.setAttribute('fill', '#8b93a3');
+        label.setAttribute('font-size', '11');
+        label.textContent = v.toFixed(isAbsolute ? 1 : 3);
+        svg.appendChild(label);
+    }
+
+    if (isCandles) {
+        series.forEach((c, i) => {
+            const xCenter = xScale(i);
+            const isUp = c.close >= c.open;
+            const color = isUp ? '#2ecc71' : '#e74c3c';
+
+            const wick = document.createElementNS(SVG_NS, 'line');
+            wick.setAttribute('x1', xCenter); wick.setAttribute('x2', xCenter);
+            wick.setAttribute('y1', yScale(c.high)); wick.setAttribute('y2', yScale(c.low));
+            wick.setAttribute('stroke', color); wick.setAttribute('stroke-width', '1');
+            svg.appendChild(wick);
+
+            const bodyTop = yScale(Math.max(c.open, c.close));
+            const bodyBottom = yScale(Math.min(c.open, c.close));
+            const bodyHeight = Math.max(bodyBottom - bodyTop, 1);
+            const bodyW = Math.max(slotW * 0.6, 1);
+
+            const rect = document.createElementNS(SVG_NS, 'rect');
+            rect.setAttribute('x', xCenter - bodyW / 2);
+            rect.setAttribute('y', bodyTop);
+            rect.setAttribute('width', bodyW);
+            rect.setAttribute('height', bodyHeight);
+            rect.setAttribute('fill', color);
+            svg.appendChild(rect);
+        });
+    } else {
+        const points = series.map((t, i) => `${xScale(i)},${yScale(t.value)}`).join(' ');
+        const poly = document.createElementNS(SVG_NS, 'polyline');
+        poly.setAttribute('points', points);
+        poly.setAttribute('fill', 'none');
+        poly.setAttribute('stroke', '#4a9eff');
+        poly.setAttribute('stroke-width', '1.5');
+        svg.appendChild(poly);
+    }
+
+    const labelEvery = Math.ceil(series.length / 10) || 1;
+    series.forEach((item, i) => {
+        if (i % labelEvery === 0) {
+            const label = document.createElementNS(SVG_NS, 'text');
+            label.setAttribute('x', xScale(i));
+            label.setAttribute('y', VIEW_H - 6);
+            label.setAttribute('text-anchor', 'middle');
+            label.setAttribute('fill', '#8b93a3');
+            label.setAttribute('font-size', '10');
+            const ts = isCandles ? item.minute : item.timestamp;
+            // Fixed offset from the front (both "...HH:MM" and "...HH:MM:SS"
+            // share the same 11-char "YYYY-MM-DD " prefix), not from the
+            // back — slicing from the end broke candle labels ("...HH:MM",
+            // no seconds) since it assumed the tick format's length.
+            label.textContent = ts.substring(11, 16);
+            svg.appendChild(label);
+        }
+    });
+
+    const hitRect = document.createElementNS(SVG_NS, 'rect');
+    hitRect.setAttribute('x', marginLeft);
+    hitRect.setAttribute('y', marginTop);
+    hitRect.setAttribute('width', plotW);
+    hitRect.setAttribute('height', VIEW_H - marginTop - marginBottom);
+    hitRect.setAttribute('fill', 'transparent');
+    hitRect.style.cursor = 'crosshair';
+    svg.appendChild(hitRect);
+
+    hitRect.addEventListener('mousemove', (evt) => {
+        const idx = indexFromClientX(evt.clientX, svg);
+        const item = series[idx];
+        if (!item) return;
+        const wrapRect = svg.parentElement.getBoundingClientRect();
+        let html;
+        if (isCandles) {
+            html = `<b>${item.minute}</b><br>O: ${item.open.toFixed(3)} &nbsp;H: ${item.high.toFixed(3)}<br>`
+                 + `L: ${item.low.toFixed(3)} &nbsp;C: ${item.close.toFixed(3)}`;
+        } else {
+            html = `<b>${item.timestamp}</b><br>Value: ${item.value.toFixed(4)}${isAbsolute ? '' : '%'}`;
+        }
+        tooltip.innerHTML = html;
+        tooltip.style.display = 'block';
+        tooltip.style.left = (evt.clientX - wrapRect.left + 14) + 'px';
+        tooltip.style.top = (evt.clientY - wrapRect.top + 14) + 'px';
+    });
+    hitRect.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+}
+
+function showChartLoading() { document.getElementById('chart-loading').style.display = 'flex'; }
+function hideChartLoading() { document.getElementById('chart-loading').style.display = 'none'; }
+
+document.getElementById('chart-type').addEventListener('change', (evt) => {
+    chartType = evt.target.value;
+    // Line mode re-renders every raw tick (up to ~1700 points on a densely
+    // recorded day) — that synchronous SVG rebuild can itself take a
+    // visible moment. The setTimeout lets the browser paint the loading
+    // overlay before that blocking work runs, instead of freezing with no
+    // feedback until it's already done.
+    showChartLoading();
+    setTimeout(() => {
+        renderChart();
+        hideChartLoading();
+    }, 0);
+});
+document.getElementById('chart-date').addEventListener('change', (evt) => {
+    chartDate = evt.target.value;
+    fetchCandlesWithLoading();
+});
+
+async function loadChartDates() {
+    try {
+        const res = await fetch('/cas_tracker/api/dates');
+        const payload = await res.json();
+        const dates = payload.dates || [];
+        const sel = document.getElementById('chart-date');
+        sel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+        const today = istTodayStr();
+        if (dates.includes(today)) sel.value = today;
+        chartDate = sel.value || null;
+    } catch (e) { /* no-op if dates fail to load; chartDate stays null (today) */ }
+}
+
+async function fetchCandles() {
+    try {
+        const url = chartDate
+            ? `/cas_tracker/api/candles?date=${encodeURIComponent(chartDate)}`
+            : '/cas_tracker/api/candles';
+        const res = await fetch(url);
+        chartPayload = await res.json();
+        renderChart();
+    } catch (e) {
+        document.getElementById('candle-sub').textContent = 'Error fetching chart data: ' + e;
+    }
+}
+
+// Wraps fetchCandles() with the loading overlay for user-initiated loads
+// (initial page load, picking a date) — deliberately NOT used by the
+// silent 5s auto-refresh below, so the live chart doesn't flash "Loading"
+// every 5 seconds during the CAS window.
+async function fetchCandlesWithLoading() {
+    showChartLoading();
+    try {
+        await fetchCandles();
+    } finally {
+        hideChartLoading();
+    }
+}
+
+setInterval(() => { if (isWithinCasWindow() && isViewingToday()) fetchCandles(); }, 5000);
+loadChartDates().then(fetchCandlesWithLoading);
+
+// ── Per-stock drill-down ──
+
+async function fetchStockHistory() {
+    const symbol = document.getElementById('stock-select').value;
+    const head = document.getElementById('stock-history-head');
+    const body = document.getElementById('stock-history-body');
+    const countEl = document.getElementById('stock-history-count');
+
+    if (!symbol) {
+        head.innerHTML = '';
+        body.innerHTML = '<tr><td class="empty-state">Select a stock above to load its history.</td></tr>';
+        countEl.textContent = '';
+        return;
+    }
+
+    body.innerHTML = '<tr><td class="empty-state">Loading...</td></tr>';
+    try {
+        const res = await fetch(`/cas_tracker/api/stock_history?symbol=${encodeURIComponent(symbol)}`);
+        const payload = await res.json();
+        const rows = payload.rows || [];
+
+        if (!rows.length) {
+            head.innerHTML = '';
+            body.innerHTML = '<tr><td class="empty-state">No recorded data points for this stock today.</td></tr>';
+            countEl.textContent = '';
+            return;
+        }
+
+        const columns = Object.keys(rows[0]);
+        head.innerHTML = columns.map(c => `<th>${c}</th>`).join('');
+        body.innerHTML = rows.map(row =>
+            '<tr>' + columns.map(c => `<td>${row[c] !== null && row[c] !== undefined ? row[c] : ''}</td>`).join('') + '</tr>'
+        ).join('');
+        countEl.textContent = `${rows.length} data points`;
+    } catch (e) {
+        body.innerHTML = `<tr><td class="empty-state">Error loading history: ${e}</td></tr>`;
+    }
+}
+
+document.getElementById('stock-select').addEventListener('change', fetchStockHistory);
+document.getElementById('btn-refresh-stock').addEventListener('click', fetchStockHistory);
+</script>
+</body>
+</html>

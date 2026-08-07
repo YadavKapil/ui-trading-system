@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NIFTY CAS Order Book Tracker</title>
+<style>
+    :root {
+        --bg: #0f1115;
+        --panel: #171a21;
+        --border: #2a2e38;
+        --text: #e6e9ef;
+        --muted: #8b93a3;
+        --green: #2ecc71;
+        --red: #e74c3c;
+        --amber: #f5a623;
+        --accent: #4a9eff;
+    }
+    * { box-sizing: border-box; }
+    body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        padding: 20px;
+    }
+    h1 { font-size: 20px; margin: 0 0 4px 0; }
+    .subtitle { color: var(--muted); font-size: 13px; }
+    .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    a.back-link { color: var(--accent); font-size: 13px; text-decoration: none; }
+    a.back-link:hover { text-decoration: underline; }
+    .controls, .time-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+    }
+    .controls label, .time-row label { font-size: 12px; color: var(--muted); }
+    select, input[type=range], button {
+        background: #0d0f14;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 8px;
+        font-size: 13px;
+    }
+    select { min-width: 120px; }
+    button {
+        background: var(--accent);
+        color: #06121f;
+        font-weight: 600;
+        cursor: pointer;
+        border: none;
+        padding: 6px 12px;
+    }
+    button.secondary { background: #232733; color: var(--text); }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .time-row input[type=range] { flex: 1; min-width: 180px; accent-color: var(--accent); }
+    .time-readout {
+        font-variant-numeric: tabular-nums;
+        font-size: 15px;
+        font-weight: 600;
+        min-width: 88px;
+        text-align: center;
+    }
+    .time-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .banner {
+        padding: 10px 14px;
+        border-radius: 8px;
+        font-size: 13px;
+        margin-bottom: 14px;
+        border: 1px solid var(--border);
+        background: #1e2430;
+        color: var(--muted);
+        display: none;
+    }
+    .banner.show { display: block; }
+
+    .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+    .stat-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 9px 14px;
+        min-width: 132px;
+    }
+    .stat-card.highlight { border-color: var(--accent); }
+    .stat-card .label {
+        font-size: 10.5px; color: var(--muted);
+        text-transform: uppercase; letter-spacing: .04em;
+    }
+    .stat-card .value {
+        font-size: 17px; font-weight: 600; margin-top: 2px;
+        font-variant-numeric: tabular-nums;
+    }
+    .stat-card .value.green { color: var(--green); }
+    .stat-card .value.red { color: var(--red); }
+    .stat-card .value.accent { color: var(--accent); }
+    .stat-card .value.amber { color: var(--amber); }
+    .stat-card .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .stats-caption { color: var(--muted); font-size: 11.5px; margin: 0 0 16px 2px; }
+
+    .section-heading {
+        font-size: 15px; font-weight: 600;
+        margin: 22px 0 4px 0; padding-top: 16px;
+        border-top: 1px solid var(--border);
+    }
+    .section-sub { color: var(--muted); font-size: 12px; margin-bottom: 12px; line-height: 1.55; }
+
+    .table-wrap { border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; }
+    table.ladder { border-collapse: collapse; width: 100%; font-size: 13px; }
+    table.ladder thead th {
+        background: #1c202a;
+        padding: 8px 14px;
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+        white-space: nowrap;
+    }
+    th.buy-col { text-align: right; color: var(--green); }
+    th.sell-col { text-align: left; color: var(--red); }
+    th.price-col { text-align: center; }
+    table.ladder tbody td {
+        padding: 9px 14px;
+        border-bottom: 1px solid #1d212b;
+        font-variant-numeric: tabular-nums;
+        position: relative;
+        white-space: nowrap;
+    }
+    table.ladder tbody tr:last-child td { border-bottom: none; }
+    td.buy-qty { text-align: right; color: var(--green); }
+    td.sell-qty { text-align: left; color: var(--red); }
+    td.price {
+        text-align: center; font-weight: 600;
+        background: #12151b; border-left: 1px solid var(--border); border-right: 1px solid var(--border);
+    }
+    td.buy-orders, td.sell-orders { color: var(--muted); font-size: 12px; }
+    td.buy-orders { text-align: right; }
+    td.sell-orders { text-align: left; }
+    .qty-bar { position: absolute; top: 0; bottom: 0; opacity: 0.15; z-index: 0; }
+    .qty-bar.buy { right: 0; background: var(--green); }
+    .qty-bar.sell { left: 0; background: var(--red); }
+    .cell-inner { position: relative; z-index: 1; }
+    tr.band-row td.price { color: var(--amber); }
+    tr.iep-row td.price { color: var(--accent); }
+    .tag {
+        font-size: 9px; font-weight: 700; letter-spacing: .03em;
+        border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: middle;
+    }
+    .tag.band { background: rgba(245,166,35,0.16); color: var(--amber); }
+    .tag.iep { background: rgba(74,158,255,0.16); color: var(--accent); }
+    .ato-row-band { background: #14181f; }
+    .ato-row-band td { font-weight: 600; }
+    .empty-state { padding: 34px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+
+    details.explainer {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-top: 18px;
+        font-size: 12.5px;
+        color: var(--muted);
+        line-height: 1.7;
+    }
+    details.explainer summary {
+        cursor: pointer; color: var(--text);
+        font-weight: 600; font-size: 13px;
+        margin-bottom: 4px;
+    }
+    details.explainer b { color: var(--text); }
+    details.explainer code {
+        background: #0d0f14; padding: 1px 5px; border-radius: 4px;
+        font-size: 12px; color: var(--accent);
+    }
+    details.explainer ul { margin: 8px 0; padding-left: 20px; }
+    details.explainer li { margin-bottom: 5px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <div>
+        <h1>NIFTY CAS Order Book Tracker</h1>
+        <div class="subtitle">Full auction book from NSE's CAS feed — pick a stock, date and second</div>
+    </div>
+    <a class="back-link" href="/cas_tracker/">&larr; Back to CAS Tracker</a>
+</div>
+
+<div class="controls">
+    <label>Stock:</label>
+    <select id="symbol-select">
+        {% for sym in nifty50_symbols %}
+        <option value="{{ sym }}">{{ sym }}</option>
+        {% endfor %}
+    </select>
+    <label>Date:</label>
+    <select id="date-select"></select>
+</div>
+
+<div class="time-row">
+    <button id="btn-prev" class="secondary" title="Previous recorded snapshot">&larr;</button>
+    <input type="range" id="time-slider" min="0" max="0" value="0" step="1" disabled>
+    <button id="btn-next" class="secondary" title="Next recorded snapshot">&rarr;</button>
+    <div class="time-readout" id="time-readout">--:--:--</div>
+    <div class="time-count" id="time-count">no data</div>
+</div>
+
+<div class="banner" id="banner"></div>
+
+<div class="stats">
+    <div class="stat-card highlight">
+        <div class="label">Equilibrium price (IEP)</div>
+        <div class="value accent" id="stat-iep">-</div>
+        <div class="sub" id="stat-iep-sub">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Would match at IEP</div>
+        <div class="value" id="stat-matched">-</div>
+        <div class="sub">shares clearing</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Whole book — buy</div>
+        <div class="value green" id="stat-book-buy">-</div>
+        <div class="sub" id="stat-ato-buy">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Whole book — sell</div>
+        <div class="value red" id="stat-book-sell">-</div>
+        <div class="sub" id="stat-ato-sell">&nbsp;</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Book imbalance</div>
+        <div class="value" id="stat-imbalance">-</div>
+        <div class="sub">buy &minus; sell</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">Price band (&plusmn;3%)</div>
+        <div class="value amber" id="stat-band">-</div>
+        <div class="sub" id="stat-band-sub">&nbsp;</div>
+    </div>
+</div>
+<div class="stats-caption">
+    Book totals are NSE's own <code style="background:none;color:inherit;padding:0;">totalBuyQuantity</code> /
+    <code style="background:none;color:inherit;padding:0;">totalSellQuantity</code> — the entire order book, not just the levels shown below.
+</div>
+
+<div class="section-heading">Price ladder</div>
+<div class="section-sub" id="ladder-sub">Merged from NSE's CAS ladder and Kite's market depth — roughly 5 levels a side, the most either feed publishes. Bars are scaled to the largest quantity shown.</div>
+<div class="table-wrap">
+    <table class="ladder">
+        <thead>
+            <tr>
+                <th class="buy-col">Buy orders</th>
+                <th class="buy-col">Buy qty</th>
+                <th class="price-col">Price</th>
+                <th class="sell-col">Sell qty</th>
+                <th class="sell-col">Sell orders</th>
+            </tr>
+        </thead>
+        <tbody id="ladder-body">
+            <tr><td class="empty-state" colspan="5">Select a stock, date and time</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<details class="explainer">
+    <summary>How to read this book (why buy prices sit above sell prices)</summary>
+    <p>
+        A closing auction is <b>not</b> a continuous market. Nothing executes until 15:30, when the exchange picks
+        the single price that clears the most volume. Until then the book legitimately looks &ldquo;crossed&rdquo; —
+        in a continuous market that would be an error; here it is the normal state.
+    </p>
+    <ul>
+        <li>
+            <b>Orders at the band edges are market orders.</b> NSE caps auction prices at &plusmn;3% of the reference
+            price. A buy displayed at the <b>upper band</b> means &ldquo;I&rsquo;ll pay up to the maximum allowed&rdquo;;
+            a sell at the <b>lower band</b> means &ldquo;I&rsquo;ll accept down to the minimum allowed.&rdquo; Both are
+            aggressive orders that will execute — at the equilibrium price, never at the band price they&rsquo;re shown at.
+        </li>
+        <li>
+            <b>At-auction (ATO) orders carry no price at all</b> and so never appear on the ladder. They&rsquo;re counted
+            in the book totals above, and they&rsquo;re usually a large share of the book.
+        </li>
+        <li>
+            <b>The ladder is a small slice of the book.</b> Neither feed publishes the full order book — NSE gives 4
+            price levels a side, Kite 5, and this page merges both. For a liquid stock mid-auction the visible levels
+            routinely sum to under a tenth of the real book, so always read the <i>whole book</i> totals above, never
+            the sum of the rows below.
+        </li>
+        <li>
+            <b>&ldquo;Would match at IEP&rdquo; is not the book size.</b> It&rsquo;s the volume that actually crosses at the
+            current equilibrium price. Buy orders priced below it and sell orders priced above it simply don&rsquo;t
+            participate, so matched volume is always far smaller than total orders.
+        </li>
+    </ul>
+    <p style="margin-bottom:0;">
+        Data is only recorded during the 15:14&ndash;15:40 IST window, and NSE only populates the ladder during
+        order collection (roughly 15:20&ndash;15:30) — outside that it is empty by design.
+    </p>
+</details>
+
+<script>
+let allTimestamps = [];
+let currentDate = null;
+let fetchToken = 0;
+
+const fmt = n => (n === null || n === undefined) ? '-' : Number(n).toLocaleString('en-IN');
+const fmtPrice = n => (n === null || n === undefined || n === 0) ? '-' : Number(n).toFixed(2);
+const timeOnly = ts => ts.split(' ')[1] || ts;
+
+function setBanner(text) {
+    const el = document.getElementById('banner');
+    if (!text) { el.className = 'banner'; el.textContent = ''; return; }
+    el.className = 'banner show';
+    el.textContent = text;
+}
+
+async function loadDates() {
+    try {
+        const res = await fetch('/cas_tracker/api/dates');
+        const payload = await res.json();
+        const dates = payload.dates || [];
+        const sel = document.getElementById('date-select');
+        sel.innerHTML = dates.map(d => `<option value="${d}">${d}</option>`).join('');
+        if (!dates.length) {
+            setBanner('No CAS data recorded yet for any date.');
+            return;
+        }
+        currentDate = dates[0];
+        await loadTimestamps();
+    } catch (e) {
+        setBanner('Error loading dates: ' + e);
+    }
+}
+
+async function loadTimestamps() {
+    const slider = document.getElementById('time-slider');
+    const countEl = document.getElementById('time-count');
+    try {
+        const res = await fetch(`/cas_tracker/api/orderbook_timestamps?date=${encodeURIComponent(currentDate)}`);
+        const payload = await res.json();
+        allTimestamps = payload.timestamps || [];
+        if (!allTimestamps.length) {
+            slider.disabled = true;
+            slider.max = 0;
+            countEl.textContent = 'no data';
+            setBanner(`No snapshots recorded for ${currentDate}.`);
+            renderEmpty('No data for this date.');
+            return;
+        }
+        setBanner('');
+        slider.disabled = false;
+        slider.min = 0;
+        slider.max = allTimestamps.length - 1;
+        // Default to mid-window: the ladder is only populated during order
+        // collection (~15:20-15:30), so the last snapshot of the day is empty.
+        slider.value = Math.floor(allTimestamps.length * 0.55);
+        countEl.textContent = `${allTimestamps.length} snapshots`;
+        await fetchAndRender();
+    } catch (e) {
+        setBanner('Error loading timestamps: ' + e);
+    }
+}
+
+function renderEmpty(message) {
+    document.getElementById('ladder-body').innerHTML =
+        `<tr><td class="empty-state" colspan="5">${message}</td></tr>`;
+    ['stat-iep','stat-matched','stat-book-buy','stat-book-sell','stat-imbalance','stat-band']
+        .forEach(id => { document.getElementById(id).textContent = '-'; });
+    ['stat-iep-sub','stat-ato-buy','stat-ato-sell','stat-band-sub']
+        .forEach(id => { document.getElementById(id).innerHTML = '&nbsp;'; });
+}
+
+function renderLadder(p) {
+    const body = document.getElementById('ladder-body');
+    const levels = p.ladder || [];
+
+    const atoBuy = p.ato_buy_qty || 0;
+    const atoSell = p.ato_sell_qty || 0;
+
+    if (!levels.length && !atoBuy && !atoSell) {
+        body.innerHTML = `<tr><td class="empty-state" colspan="5">
+            No order book at this instant — the ladder is only published during order collection (~15:20&ndash;15:30 IST).
+        </td></tr>`;
+        return;
+    }
+
+    const maxQty = Math.max(1, ...levels.map(l => Math.max(l.buy_qty || 0, l.sell_qty || 0)));
+    let html = '';
+
+    // Unpriced at-auction orders have no place on a price ladder, so they
+    // sit above it rather than being sorted in at a fake price.
+    if (atoBuy || atoSell) {
+        html += `<tr class="ato-row-band">
+            <td class="buy-orders"></td>
+            <td class="buy-qty">${atoBuy ? fmt(atoBuy) : ''}</td>
+            <td class="price">At auction<span class="tag band">NO PRICE</span></td>
+            <td class="sell-qty">${atoSell ? fmt(atoSell) : ''}</td>
+            <td class="sell-orders"></td>
+        </tr>`;
+    }
+
+    html += levels.map(l => {
+        const bq = l.buy_qty || 0;
+        const sq = l.sell_qty || 0;
+        const isUpper = p.upper_band && l.price === p.upper_band;
+        const isLower = p.lower_band && l.price === p.lower_band;
+        const isIep = p.iep && l.price === p.iep;
+
+        let tag = '';
+        if (isUpper) tag = '<span class="tag band">UPPER BAND &middot; MKT BUY</span>';
+        else if (isLower) tag = '<span class="tag band">LOWER BAND &middot; MKT SELL</span>';
+        else if (isIep) tag = '<span class="tag iep">IEP</span>';
+
+        const rowCls = (isUpper || isLower) ? 'band-row' : (isIep ? 'iep-row' : '');
+        const buyBar = bq ? `<div class="qty-bar buy" style="width:${(bq / maxQty) * 100}%"></div>` : '';
+        const sellBar = sq ? `<div class="qty-bar sell" style="width:${(sq / maxQty) * 100}%"></div>` : '';
+
+        return `<tr class="${rowCls}">
+            <td class="buy-orders">${l.buy_orders != null ? fmt(l.buy_orders) : ''}</td>
+            <td class="buy-qty">${buyBar}<span class="cell-inner">${bq ? fmt(bq) : ''}</span></td>
+            <td class="price">${fmtPrice(l.price)}${tag}</td>
+            <td class="sell-qty">${sellBar}<span class="cell-inner">${sq ? fmt(sq) : ''}</span></td>
+            <td class="sell-orders">${l.sell_orders != null ? fmt(l.sell_orders) : ''}</td>
+        </tr>`;
+    }).join('');
+
+    body.innerHTML = html;
+}
+
+function renderStats(p) {
+    document.getElementById('stat-iep').textContent = fmtPrice(p.iep);
+    document.getElementById('stat-iep-sub').textContent =
+        p.reference_price ? `ref ${fmtPrice(p.reference_price)}` : ' ';
+
+    document.getElementById('stat-matched').textContent = fmt(p.matched_qty);
+    document.getElementById('stat-book-buy').textContent = fmt(p.book_total_buy);
+    document.getElementById('stat-book-sell').textContent = fmt(p.book_total_sell);
+    document.getElementById('stat-ato-buy').textContent =
+        p.ato_buy_qty ? `incl. ${fmt(p.ato_buy_qty)} at-auction` : ' ';
+    document.getElementById('stat-ato-sell').textContent =
+        p.ato_sell_qty ? `incl. ${fmt(p.ato_sell_qty)} at-auction` : ' ';
+
+    const imb = (p.book_total_buy || 0) - (p.book_total_sell || 0);
+    const imbEl = document.getElementById('stat-imbalance');
+    imbEl.textContent = (imb >= 0 ? '+' : '') + fmt(imb);
+    imbEl.className = 'value ' + (imb >= 0 ? 'green' : 'red');
+
+    document.getElementById('stat-band').textContent =
+        (p.lower_band && p.upper_band) ? `${fmtPrice(p.lower_band)} – ${fmtPrice(p.upper_band)}` : '-';
+    document.getElementById('stat-band-sub').textContent =
+        p.last_update_time ? `NSE @ ${p.last_update_time.split(' ').pop()}` : ' ';
+}
+
+async function fetchAndRender() {
+    const slider = document.getElementById('time-slider');
+    const symbol = document.getElementById('symbol-select').value;
+    if (!allTimestamps.length) return;
+
+    const idx = Math.max(0, Math.min(allTimestamps.length - 1, parseInt(slider.value, 10)));
+    const time = timeOnly(allTimestamps[idx]);
+    document.getElementById('time-readout').textContent = time;
+
+    const token = ++fetchToken;
+    try {
+        const url = `/cas_tracker/api/orderbook_at?date=${encodeURIComponent(currentDate)}`
+                  + `&time=${encodeURIComponent(time)}&symbol=${encodeURIComponent(symbol)}`;
+        const res = await fetch(url);
+        const payload = await res.json();
+        if (token !== fetchToken) return;  // a newer request started; drop this stale response
+
+        if (res.status !== 200) {
+            renderEmpty(payload.error || 'No data.');
+            return;
+        }
+        renderStats(payload);
+        renderLadder(payload);
+    } catch (e) {
+        if (token === fetchToken) setBanner('Error fetching order book: ' + e);
+    }
+}
+
+document.getElementById('symbol-select').addEventListener('change', fetchAndRender);
+document.getElementById('date-select').addEventListener('change', async (evt) => {
+    currentDate = evt.target.value;
+    await loadTimestamps();
+});
+document.getElementById('time-slider').addEventListener('input', fetchAndRender);
+document.getElementById('btn-prev').addEventListener('click', () => {
+    const s = document.getElementById('time-slider');
+    s.value = Math.max(0, parseInt(s.value, 10) - 1);
+    fetchAndRender();
+});
+document.getElementById('btn-next').addEventListener('click', () => {
+    const s = document.getElementById('time-slider');
+    s.value = Math.min(allTimestamps.length - 1, parseInt(s.value, 10) + 1);
+    fetchAndRender();
+});
+
+loadDates();
+</script>
+
+</body>
+</html>

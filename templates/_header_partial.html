@@ -210,6 +210,14 @@
     border-color: rgba(113,128,150,0.3);
   }
   #app-header-notif-panel .notif-btn-ignore:hover:not(:disabled) { background: rgba(113,128,150,0.22); }
+  #app-header-notif-panel .notif-btn-open {
+    background: rgba(246,173,85,0.12);
+    color: #f6ad55;
+    border-color: rgba(246,173,85,0.3);
+    text-decoration: none;
+    display: inline-block;
+  }
+  #app-header-notif-panel .notif-btn-open:hover { background: rgba(246,173,85,0.22); }
   #app-header-notif-view-all {
     font-size: 11px;
     font-weight: 600;
@@ -521,6 +529,9 @@
           '<div class="notif-item-actions">' +
             '<button class="notif-btn notif-btn-complete" onclick="appHeaderNotifAction(' + n.id + ',\'completed\',event)">Complete</button>' +
             '<button class="notif-btn notif-btn-ignore"   onclick="appHeaderNotifAction(' + n.id + ',\'ignored\',event)">Ignore</button>' +
+            (n.metadata && n.metadata.action_url
+              ? '<a class="notif-btn notif-btn-open" href="' + n.metadata.action_url + '" onclick="event.stopPropagation()">' + (n.metadata.action_label || 'Open') + ' ↗</a>'
+              : '') +
           '</div>' +
         '</div>' +
         '<div class="notif-time">' + _relativeTime(n.created_at) + '</div>' +

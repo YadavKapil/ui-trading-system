@@ -386,6 +386,63 @@ class TestRestoreFromBackup:
 
 
 # ---------------------------------------------------------------------------
+# init_db — must not race a concurrent sync's staging table
+# ---------------------------------------------------------------------------
+
+
+class TestInitDbSyncRaceGuard:
+    """init_db()'s orphan-cleanup DROP must not corrupt an in-progress sync.
+
+    Regression test for a bug where init_db() unconditionally dropped
+    instruments_new, so any unrelated call to init_db() firing while
+    sync_instruments() was mid-fetch would delete the sync's staging table
+    out from under it (observed in prod as "no such table: instruments_new").
+    """
+
+    def test_init_db_skips_drop_while_sync_lock_held(self, tmp_db: str) -> None:
+        """Arrange: simulate an in-progress sync by holding _sync_lock and
+        creating instruments_new with data in it.
+        Act: call init_db() (as an unrelated concurrent caller would).
+        Assert: instruments_new is left untouched.
+        """
+        import instrument_cache  # noqa: PLC0415
+
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(f"CREATE TABLE instruments_new ({instrument_cache._INSTRUMENTS_DDL})")  # noqa: SLF001
+        conn.execute(
+            "INSERT INTO instruments_new (instrument_token, tradingsymbol) VALUES (1, 'INPROGRESS')"
+        )
+        conn.commit()
+        conn.close()
+
+        assert instrument_cache._sync_lock.acquire(blocking=False)  # noqa: SLF001
+        try:
+            instrument_cache.init_db()
+        finally:
+            instrument_cache._sync_lock.release()  # noqa: SLF001
+
+        assert _table_exists(tmp_db, "instruments_new")
+        assert _get_table_count(tmp_db, "instruments_new") == 1
+
+    def test_init_db_drops_orphan_when_no_sync_running(self, tmp_db: str) -> None:
+        """Arrange: a leftover instruments_new table from a crashed sync,
+        with no sync currently in progress (_sync_lock free).
+        Act: call init_db().
+        Assert: the orphaned staging table is cleaned up as before.
+        """
+        import instrument_cache  # noqa: PLC0415
+
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(f"CREATE TABLE instruments_new ({instrument_cache._INSTRUMENTS_DDL})")  # noqa: SLF001
+        conn.commit()
+        conn.close()
+
+        instrument_cache.init_db()
+
+        assert not _table_exists(tmp_db, "instruments_new")
+
+
+# ---------------------------------------------------------------------------
 # clear_db
 # ---------------------------------------------------------------------------
 

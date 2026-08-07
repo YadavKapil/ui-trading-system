@@ -19,10 +19,12 @@ delta_calculation_days = 5
 #On Thursday this should be 10 only
 
 [others]
-cool_off_time = 10 
+cool_off_time = 10
 #default cool off time is 30 secs
-order_gtt_regular = regular 
+order_gtt_regular = regular
 #order_gtt_regular is <gtt> or <regular>
+gtt_trigger_buffer_pct = 0.05
+#percent offset for auto-computed GTT trigger price on Advanced/exit GTTs (0.05 = 5%)
 
 [gatekeeper]
 username = YOUR_USERNAME
@@ -30,7 +32,9 @@ password = YOUR_PASSWORD
 
 [notifications]
 # Base URL used for links inside Telegram / web-push notifications.
-# Set to your dashboard's public URL if you access it remotely.
+# Local default shown below; for a remote/production deploy behind a TLS
+# reverse proxy (see vm/setup_tls_proxy.sh), set this to your public HTTPS
+# domain instead, e.g. server_base_url = https://trade.yourdomain.com
 server_base_url = http://127.0.0.1:5010
 
 [safety]

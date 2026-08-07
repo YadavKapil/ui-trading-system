@@ -1,0 +1,1090 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NIFTY 50 Contributors | Live Stock Index Impact | Raahi Bhushan</title>
+    <meta name="description" content="Track live stock contributions (+ve / -ve index points) driving NIFTY 50 price movements with intraday time-series charts.">
+    <link rel="icon" type="image/jpeg" href="/assets/favicon.jpg">
+    <link rel="shortcut icon" href="/favicon.ico">
+
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+
+        :root {
+            --bg-dark: #0b0e14;
+            --panel-bg: #131722;
+            --panel-header: #1c2030;
+            --border-color: #2a2e3d;
+            --text-main: #e1e6f0;
+            --text-muted: #848e9c;
+            --green: #0ecb81;
+            --green-bg: rgba(14, 203, 129, 0.12);
+            --red: #f6465d;
+            --red-bg: rgba(246, 70, 93, 0.12);
+            --accent-blue: #388e3c;
+            --accent-blue-bg: rgba(56, 142, 60, 0.15);
+            --card-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            padding: 20px;
+            font-size: 13px;
+        }
+
+        .header-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 20px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .title-section h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .title-section p {
+            color: var(--text-muted);
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .controls-section {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .select-box {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+        }
+
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 40px;
+            height: 22px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #2b313a;
+            transition: .3s;
+            border-radius: 22px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #2563eb;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(18px);
+        }
+
+        .kpi-container {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        @media (max-width: 900px) {
+            .kpi-container {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+
+        .kpi-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 16px 20px;
+            box-shadow: var(--card-shadow);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .kpi-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 4px;
+        }
+
+        .kpi-card.live-index::before { background-color: #a855f7; }
+        .kpi-card.pos::before { background-color: var(--green); }
+        .kpi-card.net::before { background-color: #3b82f6; }
+        .kpi-card.neg::before { background-color: var(--red); }
+
+        .kpi-label {
+            color: var(--text-muted);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .kpi-value {
+            font-size: 24px;
+            font-weight: 700;
+            margin: 8px 0 4px 0;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .kpi-value.green { color: var(--green); }
+        .kpi-value.red { color: var(--red); }
+        .kpi-value.blue { color: #60a5fa; }
+        .kpi-value.purple { color: #c084fc; }
+
+
+        .kpi-subtext {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .chart-section {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: var(--card-shadow);
+        }
+
+        .intraday-charts-section {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: var(--card-shadow);
+        }
+
+        .charts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .charts-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .charts-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .charts-grid-split {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+        }
+
+        @media (max-width: 900px) {
+            .charts-grid-split {
+                grid-template-columns: 1fr;
+            }
+        }
+
+
+        .chart-box {
+            background: var(--panel-header);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            position: relative;
+        }
+
+        .chart-box-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+
+        .top-impact-bars {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .impact-row {
+            display: grid;
+            grid-template-columns: 100px 1fr 100px;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .impact-symbol {
+            font-weight: 600;
+            text-align: right;
+            color: var(--text-main);
+        }
+
+        .impact-symbol.left {
+            text-align: right;
+        }
+
+        .impact-bar-wrapper {
+            display: flex;
+            align-items: center;
+            height: 22px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .impact-center-line {
+            position: absolute;
+            left: 50%;
+            top: 0; bottom: 0;
+            width: 2px;
+            background: var(--border-color);
+            z-index: 2;
+        }
+
+        .bar-fill {
+            height: 100%;
+            transition: width 0.4s ease;
+            position: absolute;
+        }
+
+        .bar-fill.pos {
+            background-color: var(--green);
+            right: 50%;
+            border-radius: 3px 0 0 3px;
+        }
+
+        .bar-fill.neg {
+            background-color: var(--red);
+            left: 50%;
+            border-radius: 0 3px 3px 0;
+        }
+
+
+        .impact-val {
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .impact-val.pos { color: var(--green); text-align: left; }
+        .impact-val.neg { color: var(--red); text-align: right; }
+
+        .tables-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+
+        @media (max-width: 900px) {
+            .tables-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+
+        .table-card {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: var(--card-shadow);
+        }
+
+        .table-header-banner {
+            padding: 14px 18px;
+            font-weight: 700;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .table-header-banner.pos {
+            background: rgba(14, 203, 129, 0.08);
+            color: var(--green);
+        }
+
+        .table-header-banner.neg {
+            background: rgba(246, 70, 93, 0.08);
+            color: var(--red);
+        }
+
+        .table-wrapper {
+            overflow-x: auto;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+
+        th {
+            background: var(--panel-header);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            padding: 10px 12px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th:first-child, td:first-child {
+            text-align: left;
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-size: 12px;
+        }
+
+        tr:hover {
+            background-color: rgba(255, 255, 255, 0.03);
+        }
+
+        .sym-cell {
+            font-weight: 700;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sym-name {
+            font-size: 13px;
+        }
+
+        .sym-weight {
+            font-size: 10px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .badge {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 11px;
+        }
+
+        .badge-pos {
+            background: var(--green-bg);
+            color: var(--green);
+        }
+
+        .badge-neg {
+            background: var(--red-bg);
+            color: var(--red);
+        }
+
+        .search-box {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            outline: none;
+            width: 180px;
+        }
+
+        .search-box:focus {
+            border-color: #3b82f6;
+        }
+
+        @media (max-width: 1024px) {
+            .tables-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header-container">
+        <div class="title-section">
+            <h1>📊 NIFTY 50 Contributors</h1>
+            <p>Real-time positive & negative stock point contributions to NIFTY Index</p>
+        </div>
+        <div class="controls-section">
+            <input type="text" id="searchInput" class="search-box" placeholder="Search symbol..." onkeyup="filterTables()">
+            <select class="select-box">
+                <option value="NIFTY50">NIFTY 50</option>
+            </select>
+            <div class="toggle-container">
+                <label class="switch">
+                    <input type="checkbox" id="autoRefreshToggle" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Live Refresh</span>
+            </div>
+            <span id="lastUpdated" style="color: var(--text-muted); font-size: 11px;">--</span>
+        </div>
+    </div>
+
+    <!-- KPI Summary Row -->
+    <div class="kpi-container">
+        <div class="kpi-card live-index">
+            <div class="kpi-label">NIFTY 50 Index</div>
+            <div class="kpi-value purple" id="niftyLiveValue">--</div>
+            <div class="kpi-subtext" id="niftyLiveSub">Prev Close: -- | Reconstructed: --</div>
+        </div>
+
+        <div class="kpi-card pos">
+            <div class="kpi-label">Positive Contributors</div>
+            <div class="kpi-value green" id="posSummaryValue">+0.00 pts</div>
+            <div class="kpi-subtext" id="posSummarySub">0 Stocks driving NIFTY up</div>
+        </div>
+
+        <div class="kpi-card net">
+            <div class="kpi-label">Top 5 Net Impact</div>
+            <div class="kpi-value blue" id="netSummaryValue">+0.00 pts</div>
+            <div class="kpi-subtext" id="netSummarySub">Reconstructed NIFTY: --</div>
+        </div>
+
+        <div class="kpi-card neg">
+            <div class="kpi-label">Negative Contributors</div>
+            <div class="kpi-value red" id="negSummaryValue">-0.00 pts</div>
+            <div class="kpi-subtext" id="negSummarySub">0 Stocks driving NIFTY down</div>
+        </div>
+    </div>
+
+
+    <!-- Intraday Charts Section -->
+    <div class="intraday-charts-section">
+        <div class="charts-header">
+            <div class="charts-title">
+                <span>📈 Intraday Price & Top 5 Movers Impact Trends</span>
+            </div>
+            <div class="charts-controls">
+                <select id="chartDateSelect" class="select-box" onchange="loadHistoricalChartData()">
+                    <option value="live">Today (Live)</option>
+                </select>
+                <select id="chartViewMode" class="select-box" onchange="toggleChartViewMode()">
+                    <option value="split">Split Charts (Half & Half)</option>
+                    <option value="combined">Combined Chart (Dual Y-Axis)</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Split Charts View -->
+        <div id="splitChartsContainer" class="charts-grid-split">
+            <div class="chart-box">
+                <div class="chart-box-title">
+                    <span>Chart 1: NIFTY Index Price Movement</span>
+                    <span id="chart1Sub" style="color:#38bdf8;">Live</span>
+                </div>
+                <div style="position: relative; height: 250px; width: 100%;">
+                    <canvas id="niftyPriceCanvas"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-box">
+                <div class="chart-box-title">
+                    <span>Chart 2: Net Impact of Top 5 Gainers & Drag (Index Points)</span>
+                    <span id="chart2Sub" style="color:#a855f7;">Top 5 Net</span>
+                </div>
+                <div style="position: relative; height: 250px; width: 100%;">
+                    <canvas id="top5ImpactCanvas"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Combined Chart View (Hidden by Default) -->
+        <div id="combinedChartContainer" class="chart-box" style="display: none; height: 320px;">
+            <div class="chart-box-title">
+                <span>Combined Intraday: NIFTY Index Price vs Net Top 5 Movers Impact</span>
+                <span style="color:var(--text-muted);">NIFTY (Left Y-Axis) | Top 5 Net Impact Pts (Right Y-Axis)</span>
+            </div>
+            <div style="position: relative; height: 260px; width: 100%;">
+                <canvas id="combinedCanvas"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Impact Visual Movers Chart -->
+
+    <div class="chart-section">
+        <div class="section-title">
+            <span>🔥 Key Index Impact Movers (Index Points)</span>
+            <span style="font-weight: 500; font-size: 11px; color: var(--text-muted);">Top Point Gainers vs Drag</span>
+        </div>
+        <div class="top-impact-bars" id="topImpactContainer">
+            <!-- Populated dynamically via JavaScript -->
+        </div>
+    </div>
+
+    <!-- Dual Tables Grid -->
+    <div class="tables-grid">
+        <!-- Positive Contributors Table -->
+        <div class="table-card">
+            <div class="table-header-banner pos">
+                <span>🟢 Positive Contributors</span>
+                <span id="posCountBadge" class="badge badge-pos">0 Stocks</span>
+            </div>
+            <div class="table-wrapper">
+                <table id="posTable">
+                    <thead>
+                        <tr>
+                            <th>Company</th>
+                            <th>LTP</th>
+                            <th>Change (%)</th>
+                            <th>Contrib (Pts)</th>
+                            <th>High</th>
+                            <th>Low</th>
+                        </tr>
+                    </thead>
+                    <tbody id="posTableBody">
+                        <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px;">Loading live contributor data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Negative Contributors Table -->
+        <div class="table-card">
+            <div class="table-header-banner neg">
+                <span>🔴 Negative Contributors</span>
+                <span id="negCountBadge" class="badge badge-neg">0 Stocks</span>
+            </div>
+            <div class="table-wrapper">
+                <table id="negTable">
+                    <thead>
+                        <tr>
+                            <th>Company</th>
+                            <th>LTP</th>
+                            <th>Change (%)</th>
+                            <th>Contrib (Pts)</th>
+                            <th>High</th>
+                            <th>Low</th>
+                        </tr>
+                    </thead>
+                    <tbody id="negTableBody">
+                        <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 30px;">Loading live contributor data...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let pollTimer = null;
+        let chart1Instance = null;
+        let chart2Instance = null;
+        let combinedChartInstance = null;
+
+        async function fetchContributorsData() {
+            try {
+                const response = await fetch('/cas_tracker/api/contributors');
+                if (!response.ok) return;
+                const data = await response.json();
+                if (!data.ready) return;
+
+                updateUI(data);
+            } catch (err) {
+                console.error("Failed to fetch contributors data:", err);
+            }
+        }
+
+        function updateUI(data) {
+            // Update Timestamp
+            document.getElementById('lastUpdated').innerText = `Updated: ${data.timestamp || new Date().toLocaleTimeString()}`;
+
+            // Update NIFTY Live Index Card
+            const liveVal = data.nifty_live || data.nifty_estimate;
+            const liveValStr = liveVal ? liveVal.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
+            document.getElementById('niftyLiveValue').innerText = liveValStr;
+
+            const prevCloseStr = data.nifty_prev_close ? data.nifty_prev_close.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
+            const estStr = data.nifty_estimate ? data.nifty_estimate.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '--';
+            document.getElementById('niftyLiveSub').innerText = `Prev Close: ${prevCloseStr} | Reconstructed: ${estStr}`;
+
+            // Update KPI Cards
+            const posPts = data.total_positive_pts || 0;
+            const negPts = data.total_negative_pts || 0;
+            const netPts = data.net_contribution_pts || 0;
+            const posCount = data.positive_count || 0;
+            const negCount = data.negative_count || 0;
+
+            document.getElementById('posSummaryValue').innerText = `+${posPts.toFixed(2)} pts`;
+            document.getElementById('posSummarySub').innerText = `${posCount} Positive Stocks`;
+            document.getElementById('posCountBadge').innerText = `${posCount} Stocks (+${posPts.toFixed(2)} pts)`;
+
+            document.getElementById('negSummaryValue').innerText = `${negPts.toFixed(2)} pts`;
+            document.getElementById('negSummarySub').innerText = `${negCount} Negative Stocks`;
+            document.getElementById('negCountBadge').innerText = `${negCount} Stocks (${negPts.toFixed(2)} pts)`;
+
+            const netSign = netPts >= 0 ? '+' : '';
+            const netColorClass = netPts >= 0 ? 'green' : 'red';
+            const netEl = document.getElementById('netSummaryValue');
+            netEl.innerText = `${netSign}${netPts.toFixed(2)} pts`;
+            netEl.className = `kpi-value ${netColorClass}`;
+            document.getElementById('netSummarySub').innerText = `Reconstructed NIFTY: ${data.nifty_estimate || '--'} (Live: ${data.nifty_live || '--'})`;
+
+            // Update Visual Impact Chart (Top 5 Positive vs Top 5 Negative)
+            renderVisualImpactChart(data.positive_contributors || [], data.negative_contributors || []);
+
+            // Render Tables
+            renderTable('posTableBody', data.positive_contributors || [], true);
+            renderTable('negTableBody', data.negative_contributors || [], false);
+
+            filterTables();
+
+            // If 'Today (Live)' is selected, refresh intraday chart data
+            const dateSel = document.getElementById('chartDateSelect');
+            if (dateSel && dateSel.value === 'live') {
+                loadHistoricalChartData();
+            }
+        }
+
+        function renderVisualImpactChart(posList, negList) {
+            const topPos = posList.slice(0, 5);
+            const topNeg = negList.slice(0, 5);
+
+            let maxImpact = 1;
+            topPos.forEach(item => { if (Math.abs(item.contribution_pts) > maxImpact) maxImpact = Math.abs(item.contribution_pts); });
+            topNeg.forEach(item => { if (Math.abs(item.contribution_pts) > maxImpact) maxImpact = Math.abs(item.contribution_pts); });
+
+            const container = document.getElementById('topImpactContainer');
+            container.innerHTML = '';
+
+            const pairsCount = Math.max(topPos.length, topNeg.length);
+            for (let i = 0; i < pairsCount; i++) {
+                const pos = topPos[i];
+                const neg = topNeg[i];
+
+                const row = document.createElement('div');
+                row.className = 'impact-row';
+
+                const posSym = pos ? pos.symbol : '';
+                const posPts = pos ? pos.contribution_pts : 0;
+                const posPctWidth = (posPts / maxImpact) * 50;
+
+                const negSym = neg ? neg.symbol : '';
+                const negPts = neg ? neg.contribution_pts : 0;
+                const negPctWidth = (Math.abs(negPts) / maxImpact) * 50;
+
+                row.innerHTML = `
+                    <div class="impact-val pos">${pos ? '+' + posPts.toFixed(2) : ''} <span style="color:var(--text-main); font-size:12px; margin-left:4px;">${posSym}</span></div>
+                    <div class="impact-bar-wrapper">
+                        <div class="impact-center-line"></div>
+                        ${pos ? `<div class="bar-fill pos" style="width: ${posPctWidth}%;"></div>` : ''}
+                        ${neg ? `<div class="bar-fill neg" style="width: ${negPctWidth}%;"></div>` : ''}
+                    </div>
+                    <div class="impact-val neg"><span style="color:var(--text-main); font-size:12px; margin-right:4px;">${negSym}</span> ${neg ? negPts.toFixed(2) : ''}</div>
+                `;
+                container.appendChild(row);
+            }
+        }
+
+        function renderTable(tbodyId, list, isPositive) {
+            const tbody = document.getElementById(tbodyId);
+            tbody.innerHTML = '';
+
+            if (!list || list.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">No ${isPositive ? 'positive' : 'negative'} contributors</td></tr>`;
+                return;
+            }
+
+            list.forEach(item => {
+                const tr = document.createElement('tr');
+                tr.setAttribute('data-symbol', item.symbol.toLowerCase());
+
+                const changeClass = item.change_pts >= 0 ? 'color: var(--green);' : 'color: var(--red);';
+                const changeSign = item.change_pts >= 0 ? '+' : '';
+                const wtVal = (item.weight_pct !== undefined && item.weight_pct !== null) ? item.weight_pct : ((item.weight !== undefined && item.weight !== null) ? item.weight : null);
+                const wtStr = wtVal !== null ? `Weight: ${Number(wtVal).toFixed(2)}%` : 'Weight: --';
+
+                tr.innerHTML = `
+                    <td>
+                        <div class="sym-cell">
+                            <span class="sym-name">${item.symbol}</span>
+                            <span class="sym-weight">${wtStr}</span>
+                        </div>
+                    </td>
+
+                    <td style="font-weight:600;">${item.ltp.toFixed(2)}</td>
+                    <td style="${changeClass} font-weight:600;">
+                        ${changeSign}${item.change_pts.toFixed(2)} (${changeSign}${item.return_pct.toFixed(2)}%)
+                    </td>
+                    <td style="${changeClass} font-weight:700; font-size:13px;">
+                        ${contribPtsSign}${item.contribution_pts.toFixed(2)}
+                    </td>
+                    <td style="color:var(--text-muted);">${item.high ? item.high.toFixed(2) : '--'}</td>
+                    <td style="color:var(--text-muted);">${item.low ? item.low.toFixed(2) : '--'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function filterTables() {
+            const query = document.getElementById('searchInput').value.toLowerCase();
+            const rows = document.querySelectorAll('tbody tr');
+
+            rows.forEach(row => {
+                const symbol = row.getAttribute('data-symbol');
+                if (!symbol) return;
+                if (symbol.includes(query)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+
+        // --- CHART FUNCTIONS ---
+
+        async function fetchAvailableDates() {
+            try {
+                const res = await fetch('/cas_tracker/api/contributors/dates');
+                if (!res.ok) return;
+                const data = await res.json();
+                const select = document.getElementById('chartDateSelect');
+                select.innerHTML = '<option value="live">Today (Live)</option>';
+                
+                (data.dates || []).forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d;
+                    opt.innerText = d;
+                    select.appendChild(opt);
+                });
+            } catch (e) {
+                console.error("Failed to load contributor dates:", e);
+            }
+        }
+
+        async function loadHistoricalChartData() {
+            const select = document.getElementById('chartDateSelect');
+            const selectedValue = select ? select.value : 'live';
+            
+            let queryParam = selectedValue;
+            if (selectedValue === 'live') {
+                const todayStr = new Date().toISOString().split('T')[0];
+                queryParam = todayStr;
+            }
+
+            try {
+                const res = await fetch(`/cas_tracker/api/contributors/history?date=${queryParam}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                renderCharts(data.history || []);
+            } catch (e) {
+                console.error("Failed to load chart history:", e);
+            }
+        }
+
+        function toggleChartViewMode() {
+            const mode = document.getElementById('chartViewMode').value;
+            const splitBox = document.getElementById('splitChartsContainer');
+            const combinedBox = document.getElementById('combinedChartContainer');
+
+            if (mode === 'combined') {
+                splitBox.style.display = 'none';
+                combinedBox.style.display = 'block';
+            } else {
+                splitBox.style.display = 'grid';
+                combinedBox.style.display = 'none';
+            }
+        }
+
+        function renderCharts(history) {
+            if (!history || history.length === 0) return;
+
+            const labels = history.map(item => item.time || item.timestamp);
+            const niftyData = history.map(item => item.nifty_live || item.nifty_estimate);
+            const top5NetData = history.map(item => item.top5_net_pts || 0);
+
+            // Compute Y-Axis min & max per user specifications
+            const validNifty = niftyData.filter(v => v !== null && v !== undefined && v > 0);
+            const minNifty = validNifty.length > 0 ? Math.min(...validNifty) : 24000;
+            const maxNifty = validNifty.length > 0 ? Math.max(...validNifty) : 24000;
+            const yNiftyMin = minNifty * (1 - 0.003); // -0.3%
+            const yNiftyMax = maxNifty * (1 + 0.003); // +0.3%
+
+            const validImpact = top5NetData.filter(v => v !== null && v !== undefined);
+            const minImpact = validImpact.length > 0 ? Math.min(...validImpact) : 0;
+            const maxImpact = validImpact.length > 0 ? Math.max(...validImpact) : 0;
+            const currentNiftyVal = validNifty.length > 0 ? validNifty[validNifty.length - 1] : 24000;
+            const impactMargin = currentNiftyVal * 0.002; // 0.2% of NIFTY value
+            const yImpactMin = minImpact - impactMargin;
+            const yImpactMax = maxImpact + impactMargin;
+
+            const pointRadius = labels.length > 50 ? 0 : 2;
+
+            // 1. Chart 1: NIFTY Price Movement
+            if (chart1Instance) {
+                chart1Instance.data.labels = labels;
+                chart1Instance.data.datasets[0].data = niftyData;
+                chart1Instance.data.datasets[0].pointRadius = pointRadius;
+                chart1Instance.options.scales.y.min = yNiftyMin;
+                chart1Instance.options.scales.y.max = yNiftyMax;
+                chart1Instance.update('none');
+            } else {
+                const ctx1 = document.getElementById('niftyPriceCanvas').getContext('2d');
+                chart1Instance = new Chart(ctx1, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'NIFTY Index Price',
+                            data: niftyData,
+                            borderColor: '#38bdf8',
+                            backgroundColor: 'rgba(56, 189, 248, 0.08)',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: pointRadius,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        scales: {
+                            x: {
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#848e9c', font: { size: 10 }, maxTicksLimit: 12 }
+                            },
+                            y: {
+                                min: yNiftyMin,
+                                max: yNiftyMax,
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#848e9c', font: { size: 10 } }
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // 2. Chart 2: Top 5 Net Impact
+            if (chart2Instance) {
+                chart2Instance.data.labels = labels;
+                chart2Instance.data.datasets[0].data = top5NetData;
+                chart2Instance.data.datasets[0].pointRadius = pointRadius;
+                chart2Instance.options.scales.y.min = yImpactMin;
+                chart2Instance.options.scales.y.max = yImpactMax;
+                chart2Instance.update('none');
+            } else {
+                const ctx2 = document.getElementById('top5ImpactCanvas').getContext('2d');
+                chart2Instance = new Chart(ctx2, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Top 5 Net Impact (Index Points)',
+                            data: top5NetData,
+                            borderColor: '#a855f7',
+                            backgroundColor: 'rgba(168, 85, 247, 0.08)',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: pointRadius,
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        scales: {
+                            x: {
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#848e9c', font: { size: 10 }, maxTicksLimit: 12 }
+                            },
+                            y: {
+                                min: yImpactMin,
+                                max: yImpactMax,
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#848e9c', font: { size: 10 } }
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // 3. Combined Chart (Dual Y-Axis)
+            if (combinedChartInstance) {
+                combinedChartInstance.data.labels = labels;
+                combinedChartInstance.data.datasets[0].data = niftyData;
+                combinedChartInstance.data.datasets[0].pointRadius = pointRadius;
+                combinedChartInstance.data.datasets[1].data = top5NetData;
+                combinedChartInstance.data.datasets[1].pointRadius = pointRadius;
+                combinedChartInstance.options.scales.yNifty.min = yNiftyMin;
+                combinedChartInstance.options.scales.yNifty.max = yNiftyMax;
+                combinedChartInstance.options.scales.yImpact.min = yImpactMin;
+                combinedChartInstance.options.scales.yImpact.max = yImpactMax;
+                combinedChartInstance.update('none');
+            } else {
+                const ctx3 = document.getElementById('combinedCanvas').getContext('2d');
+                combinedChartInstance = new Chart(ctx3, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: 'NIFTY Price',
+                                data: niftyData,
+                                borderColor: '#38bdf8',
+                                yAxisID: 'yNifty',
+                                tension: 0.3,
+                                pointRadius: pointRadius,
+                            },
+                            {
+                                label: 'Top 5 Net Impact (Pts)',
+                                data: top5NetData,
+                                borderColor: '#a855f7',
+                                yAxisID: 'yImpact',
+                                tension: 0.3,
+                                pointRadius: pointRadius,
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        scales: {
+                            x: {
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#848e9c', font: { size: 10 }, maxTicksLimit: 12 }
+                            },
+                            yNifty: {
+                                type: 'linear',
+                                position: 'left',
+                                min: yNiftyMin,
+                                max: yNiftyMax,
+                                grid: { color: 'rgba(255, 255, 255, 0.04)' },
+                                ticks: { color: '#38bdf8', font: { size: 10 } },
+                                title: { display: true, text: 'NIFTY Price', color: '#38bdf8', font: { size: 11 } }
+                            },
+                            yImpact: {
+                                type: 'linear',
+                                position: 'right',
+                                min: yImpactMin,
+                                max: yImpactMax,
+                                grid: { drawOnChartArea: false },
+                                ticks: { color: '#a855f7', font: { size: 10 } },
+                                title: { display: true, text: 'Top 5 Net Impact Pts', color: '#a855f7', font: { size: 11 } }
+                            }
+                        },
+                        plugins: {
+                            legend: { labels: { color: '#e1e6f0', font: { size: 11 } } }
+                        }
+                    }
+                });
+            }
+        }
+
+
+        function startPolling() {
+            fetchContributorsData();
+            fetchAvailableDates();
+            loadHistoricalChartData();
+            pollTimer = setInterval(() => {
+                if (document.getElementById('autoRefreshToggle').checked) {
+                    fetchContributorsData();
+                }
+            }, 5000);
+        }
+
+        document.getElementById('autoRefreshToggle').addEventListener('change', (e) => {
+            if (e.target.checked) {
+                fetchContributorsData();
+            }
+        });
+
+        startPolling();
+    </script>
+</body>
+</html>
+

@@ -241,7 +241,23 @@ def init_scheduler(  # type: ignore[type-arg]
         misfire_grace_time=300,
     )
 
-    job_count = 12 + (1 if scalping_auto_start_fn else 0) + (1 if scalping_auto_stop_fn else 0)
+    _scheduler.add_job(
+        func=_job_delta_live_snapshot,
+        trigger=IntervalTrigger(minutes=1, timezone="Asia/Kolkata"),
+        id="delta_live_snapshot",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+
+    _scheduler.add_job(
+        func=_job_nifty_zone_check,
+        trigger=IntervalTrigger(minutes=5, timezone="Asia/Kolkata"),
+        id="nifty_zone_check",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    job_count = 14 + (1 if scalping_auto_start_fn else 0) + (1 if scalping_auto_stop_fn else 0)
     _scheduler.start()
     logger.info(
         "Notification scheduler started — %d jobs registered "
@@ -250,7 +266,8 @@ def init_scheduler(  # type: ignore[type-arg]
         "fetch_candles_eod @ 3:50 PM, nifty_margin_check @ 1:00 PM, "
         "nifty_delta_check @ every 15 min, gtt_monitor_check @ every 10 min, "
         "duplicate_order_check @ every 5 min, copytrade_margin_check @ every 15 min, "
-        "position_guard_check @ every 5 min, "
+        "position_guard_check @ every 5 min, delta_live_snapshot @ every 1 min, "
+        "nifty_zone_check @ every 5 min, "
         "notification_purge @ 4:00 AM%s IST)",
         job_count,
         ", scalping_auto_start @ 10:00 AM, scalping_auto_stop @ 3:45 PM"
@@ -659,7 +676,7 @@ def _job_fetch_candles_eod() -> None:
         ZerodhaCandleFetcher = _fetcher_module.ZerodhaCandleFetcher
 
         result = ZerodhaCandleFetcher().run_daily_fetch(
-            underlyings=["NIFTY", "SENSEX"],
+            underlyings=["NIFTY", "SENSEX", "BANKNIFTY"],
             n_strikes_each_side=10,
         )
         logger.info("FETCH_CANDLES_EOD: complete — %s", result)
@@ -1156,6 +1173,26 @@ def _job_position_guard_check() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job: NIFTY confluence zone enter/exit check (every 5 min, market hours weekdays)
+# ---------------------------------------------------------------------------
+
+
+def _job_nifty_zone_check() -> None:
+    """Delegate to swing_levels.zone_alert_monitor.check_nifty_zone_transitions().
+
+    The market-hours guard and all error handling live in the monitor module
+    so the logic stays testable independent of APScheduler.
+    Never raises.
+    """
+    try:
+        from swing_levels.zone_alert_monitor import check_nifty_zone_transitions
+
+        check_nifty_zone_transitions()
+    except Exception as exc:
+        logger.error("NIFTY_ZONE_CHECK job failed unexpectedly: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Job: GTT vs Position mismatch check (every 10 min, market hours weekdays)
 # ---------------------------------------------------------------------------
 
@@ -1173,6 +1210,26 @@ def _job_gtt_monitor_check() -> None:
         run_gtt_monitor_check()
     except Exception as exc:
         logger.error("GTT_MONITOR_CHECK job failed unexpectedly: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Job: Delta Limits live-delta snapshot (every 1 min, market hours only)
+# ---------------------------------------------------------------------------
+
+
+def _job_delta_live_snapshot() -> None:
+    """Delegate to delta_live_tracker.compute_live_delta_snapshot().
+
+    The market-hours guard and all error handling live in delta_live_tracker
+    so the logic stays testable independent of APScheduler.
+    Never raises.
+    """
+    try:
+        from delta_live_tracker import compute_live_delta_snapshot
+
+        compute_live_delta_snapshot()
+    except Exception as exc:
+        logger.error("DELTA_LIVE_SNAPSHOT job failed unexpectedly: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

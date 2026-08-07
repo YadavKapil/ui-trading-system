@@ -286,3 +286,22 @@ def test_list_ignored_returns_all_rows(temp_db):
     rows = position_guard_db.list_ignored()
     symbols = {row["tradingsymbol"] for row in rows}
     assert symbols == {"NIFTY25JUN25000CE", "BANKNIFTY25JUN45000PE"}
+
+
+def test_cleanup_prunes_ignores_for_symbols_missing_from_instruments(temp_db, monkeypatch):
+    """Ignore rows for expired contracts (no longer in instruments) get pruned."""
+    import instrument_cache
+
+    position_guard_db.ignore_symbol("NIFTY25JUN25000CE", "NFO", "fp1")  # still live
+    position_guard_db.ignore_symbol("NIFTY24APR25000CE", "NFO", "fp2")  # expired
+
+    def _fake_get_instrument(symbol, exchange=None):
+        return {"tradingsymbol": symbol} if symbol == "NIFTY25JUN25000CE" else None
+
+    monkeypatch.setattr(instrument_cache, "get_instrument", _fake_get_instrument)
+
+    removed = position_guard_db.cleanup_ignored_symbols_not_in_instruments()
+
+    assert removed == 1
+    symbols = {row["tradingsymbol"] for row in position_guard_db.list_ignored()}
+    assert symbols == {"NIFTY25JUN25000CE"}

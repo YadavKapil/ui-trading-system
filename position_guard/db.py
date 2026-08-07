@@ -144,6 +144,44 @@ def is_ignored(tradingsymbol: str, exchange: str, fingerprint: str) -> bool:
         conn.close()
 
 
+def cleanup_ignored_symbols_not_in_instruments() -> int:
+    """Remove ignore rows for symbols no longer present in the instrument cache.
+
+    Called after each instrument sync so ignores for expired contracts don't
+    linger indefinitely once the underlying symbol drops out of the
+    instruments table.
+
+    Returns:
+        Number of ignore rows removed.
+    """
+    from instrument_cache import get_instrument
+
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT tradingsymbol, exchange FROM ignored_symbols"
+        ).fetchall()
+        removed = 0
+        for row in rows:
+            if get_instrument(row["tradingsymbol"], row["exchange"]) is None:
+                conn.execute(
+                    "DELETE FROM ignored_symbols WHERE tradingsymbol = ? AND exchange = ?",
+                    (row["tradingsymbol"], row["exchange"]),
+                )
+                removed += 1
+        if removed:
+            conn.commit()
+            logger.info(
+                "position_guard_db: pruned %d stale ignore(s) after instrument sync", removed
+            )
+        return removed
+    except sqlite3.Error:
+        logger.exception("position_guard_db.cleanup_ignored_symbols_not_in_instruments failed")
+        return 0
+    finally:
+        conn.close()
+
+
 def list_ignored() -> list[dict[str, Any]]:
     """Return all currently ignored symbols.
 

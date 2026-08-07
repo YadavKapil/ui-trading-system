@@ -572,7 +572,19 @@
 
         <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                <h2 style="margin: 0;">Start New Instances</h2>
+                <h2 style="margin: 0;">Start New Instances
+                    <a href="javascript:void(0)" onclick="openGapSettingsModal()"
+                        style="font-size: 12px; font-weight: normal; margin-left: 10px;"
+                        title="Configure per-underlying auto gap based on expected underlying move">Auto Gap by Move</a>
+                    <span style="display:inline-flex; align-items:center; gap:6px; margin-left:14px; font-size:12px; font-weight:normal;">
+                        <span id="weGapModeLabelPercent" style="color:#2ecc71;">% Gap</span>
+                        <label class="switch">
+                            <input type="checkbox" id="weGapModeToggle" onchange="onWeGapModeToggle(this.checked)">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="weGapModeLabelAuto" style="color:#888;">Auto by Move</span>
+                    </span>
+                </h2>
                 <div>
                     <button class="btn btn-secondary" onclick="openLoadPositionsModal()"
                         style="margin-right: 10px;">Load
@@ -588,17 +600,17 @@
                         <th style="width: 10%;">
                             Buy Gap<br>
                             <div style="display: flex; align-items: center; justify-content: flex-start; gap: 5px; margin-top: 5px; font-weight: normal; font-size: 13px;">
-                                <i class="fas fa-arrow-down" style="cursor: pointer; color: #e74c3c;" onclick="adjustGap('buy', -1)" title="Decrease Buy Gap"></i>
+                                <i class="fas fa-arrow-down we-gap-arrow" style="cursor: pointer; color: #e74c3c;" onclick="adjustGap('buy', -1)" title="Decrease Buy Gap"></i>
                                 <span id="buyGapPercentDisplay">25%</span>
-                                <i class="fas fa-arrow-up" style="cursor: pointer; color: #2ecc71;" onclick="adjustGap('buy', 1)" title="Increase Buy Gap"></i>
+                                <i class="fas fa-arrow-up we-gap-arrow" style="cursor: pointer; color: #2ecc71;" onclick="adjustGap('buy', 1)" title="Increase Buy Gap"></i>
                             </div>
                         </th>
                         <th style="width: 10%;">
                             Sell Gap<br>
                             <div style="display: flex; align-items: center; justify-content: flex-start; gap: 5px; margin-top: 5px; font-weight: normal; font-size: 13px;">
-                                <i class="fas fa-arrow-down" style="cursor: pointer; color: #e74c3c;" onclick="adjustGap('sell', -1)" title="Decrease Sell Gap"></i>
+                                <i class="fas fa-arrow-down we-gap-arrow" style="cursor: pointer; color: #e74c3c;" onclick="adjustGap('sell', -1)" title="Decrease Sell Gap"></i>
                                 <span id="sellGapPercentDisplay">25%</span>
-                                <i class="fas fa-arrow-up" style="cursor: pointer; color: #2ecc71;" onclick="adjustGap('sell', 1)" title="Increase Sell Gap"></i>
+                                <i class="fas fa-arrow-up we-gap-arrow" style="cursor: pointer; color: #2ecc71;" onclick="adjustGap('sell', 1)" title="Increase Sell Gap"></i>
                             </div>
                         </th>
                         <th style="width: 10%;">Buy Qty</th>
@@ -697,6 +709,66 @@
                     </tr>
                 </tbody>
             </table>
+        </div>
+
+        <!-- Amplitude Testbed (Phase 1 — preview only, not wired into live orders) -->
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h2 style="margin: 0;">🧪 Amplitude Testbed</h2>
+                <span id="ampDteIndicator" style="font-size: 12px; color: #aaa; font-weight: 500;"></span>
+            </div>
+            <p style="color: #666; font-size: 13px; margin-top: -10px; margin-bottom: 15px;">
+                Preview-only: shows what buy/sell gap the IV+gamma amplitude formula would suggest.
+                Does <b>not</b> start, modify, or affect any running instance. DTE is holiday-aware
+                (excludes declared NSE holidays, not just weekends).
+            </p>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="amp_underlying">Underlying:</label>
+                    <select id="amp_underlying" onchange="ampLoadExpiries()">
+                        <option value="NIFTY">NIFTY</option>
+                        <option value="BANKNIFTY">BANKNIFTY</option>
+                        <option value="SENSEX">SENSEX</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="amp_expiry">Expiry:</label>
+                    <select id="amp_expiry" onchange="ampFetchTable()"></select>
+                </div>
+                <div class="form-group">
+                    <label for="amp_scope">Show:</label>
+                    <select id="amp_scope" onchange="ampFetchTable()">
+                        <option value="true">Existing Positions</option>
+                        <option value="false">All Strikes (full chain)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="amp_reference_dte">
+                        Reference DTE (multiplier=1.0 here)
+                        <a href="#" onclick="ampResetReferenceDteToAuto(); return false;" style="font-size: 11px; margin-left: 6px;">reset to auto</a>:
+                    </label>
+                    <input type="number" step="1" id="amp_reference_dte" value="" placeholder="auto" onchange="ampReferenceDteChanged()">
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="amp_correction_multiplier">Correction Multiplier:</label>
+                    <input type="number" step="0.1" id="amp_correction_multiplier" value="1.0" oninput="ampRenderTable()">
+                </div>
+                <div class="form-group">
+                    <label for="amp_hard_floor_pct">Hard Floor Gap %:</label>
+                    <input type="number" step="0.5" id="amp_hard_floor_pct" value="5" oninput="ampRenderTable()">
+                </div>
+                <div class="form-group">
+                    <label for="amp_hard_ceiling_pct">Hard Ceiling Gap %:</label>
+                    <input type="number" step="1" id="amp_hard_ceiling_pct" value="90" oninput="ampRenderTable()">
+                </div>
+            </div>
+            <p style="color: #888; font-size: 12px; margin-top: -5px;">
+                Hard Ceiling caps the suggested gap so it can never reach or exceed the option's own LTP —
+                a buy gap ≥ LTP would imply a negative/zero buy price, which Kite would reject.
+            </p>
+            <div id="ampResult" style="margin-top: 15px;"></div>
         </div>
 
         <!-- Order Tracking Section -->
@@ -902,9 +974,64 @@
         </div>
     </div>
 
+    <!-- Auto Gap By Move Settings Modal -->
+    <div id="gapSettingsModal" class="modal">
+        <div class="modal-content" style="width: 520px; max-width: 90%;">
+            <div class="modal-header">
+                <h2>Auto Gap by Underlying Move</h2>
+                <span class="close" onclick="closeGapSettingsModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p style="font-size: 12px; color: #888; margin-top: 0;">
+                    For each underlying, set the expected down/up move (points) that should trigger a leg.
+                    Buy/Sell gap for CE/PE symbols is then computed via option greeks reprice instead of a
+                    flat 25% of premium. Leave both fields blank to keep the default 25% behavior.
+                </p>
+                <div id="gapSettingsBody"></div>
+                <div style="margin-top: 15px; text-align: right;">
+                    <button class="btn btn-primary" onclick="saveGapSettings()">Save &amp; Recompute Gaps</button>
+                </div>
+                <div id="gap-settings-status" style="margin-top: 10px; font-size: 12px;"></div>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentBuyGapPercent = 25;
         let currentSellGapPercent = 25;
+
+        // ── Gap mechanism toggle (% Gap vs Auto Gap by Move) ────────────────────
+        let weGapMode = localStorage.getItem('weGapMode') === 'auto' ? 'auto' : 'percent';
+
+        function setGapArrowsEnabled(enabled) {
+            document.querySelectorAll('.we-gap-arrow').forEach(el => {
+                el.style.opacity = enabled ? '1' : '0.35';
+                el.style.pointerEvents = enabled ? 'auto' : 'none';
+            });
+        }
+
+        function applyWeGapModeStyling(isAuto) {
+            document.getElementById('weGapModeLabelPercent').style.color = isAuto ? '#888' : '#2ecc71';
+            document.getElementById('weGapModeLabelAuto').style.color = isAuto ? '#2ecc71' : '#888';
+            setGapArrowsEnabled(!isAuto);
+        }
+
+        async function onWeGapModeToggle(isAuto) {
+            weGapMode = isAuto ? 'auto' : 'percent';
+            localStorage.setItem('weGapMode', weGapMode);
+            applyWeGapModeStyling(isAuto);
+            if (isAuto) {
+                await refreshGapsForVisibleRows();
+            } else {
+                await refreshPercentGapsForVisibleRows();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const isAuto = weGapMode === 'auto';
+            document.getElementById('weGapModeToggle').checked = isAuto;
+            applyWeGapModeStyling(isAuto);
+        });
 
         function adjustGap(type, change) {
             if (type === 'buy') {
@@ -1012,6 +1139,11 @@
             fetchStatus();
             setInterval(fetchStatus, 2000);
 
+            // Live delta snapshot — covers every underlying/expiry with an open
+            // position, independent of whether a wave-extractor instance is running
+            fetchDeltaLiveSnapshot();
+            setInterval(fetchDeltaLiveSnapshot, 10000);
+
             // Order tracking
             refreshOrderTracking();
             setInterval(refreshOrderTracking, 10000);
@@ -1019,7 +1151,128 @@
             // Live positions from Kite (separate poll to avoid overloading the 2 s status poll)
             fetchLivePositions();
             setInterval(fetchLivePositions, 10000);
+
+            // Amplitude Testbed
+            ampLoadExpiries();
         });
+
+        // ---------------------------------------------------------------
+        // Amplitude Testbed
+        // ---------------------------------------------------------------
+        let ampRows = [];  // raw rows from the last /amplitude_table fetch
+        let ampReferenceDteManual = false;  // true once the user edits Reference DTE by hand
+
+        function ampReferenceDteChanged() {
+            ampReferenceDteManual = true;
+            ampFetchTable();
+        }
+
+        function ampResetReferenceDteToAuto() {
+            ampReferenceDteManual = false;
+            document.getElementById('amp_reference_dte').value = '';
+            ampFetchTable();
+        }
+
+        async function ampLoadExpiries() {
+            const underlying = document.getElementById('amp_underlying').value;
+            const expirySelect = document.getElementById('amp_expiry');
+            expirySelect.innerHTML = '<option>Loading…</option>';
+            try {
+                const res = await fetch(`/api/wave_extractor/amplitude_expiries?underlying=${underlying}`);
+                const data = await res.json();
+                expirySelect.innerHTML = (data.expiries || [])
+                    .map(e => `<option value="${e}">${e}</option>`).join('');
+            } catch (err) {
+                expirySelect.innerHTML = '<option>Error loading expiries</option>';
+            }
+            ampFetchTable();
+        }
+
+        async function ampFetchTable() {
+            const underlying = document.getElementById('amp_underlying').value;
+            const expiry = document.getElementById('amp_expiry').value;
+            const positionsOnly = document.getElementById('amp_scope').value;
+            const resultDiv = document.getElementById('ampResult');
+            const dteIndicator = document.getElementById('ampDteIndicator');
+
+            if (!expiry) { resultDiv.innerHTML = ''; return; }
+
+            resultDiv.innerHTML = '<p style="color:#888;">Loading…</p>';
+            try {
+                const params = new URLSearchParams({
+                    underlying, expiry,
+                    positions_only: positionsOnly,
+                });
+                if (ampReferenceDteManual) {
+                    params.set('reference_dte', document.getElementById('amp_reference_dte').value);
+                }
+                const res = await fetch(`/api/wave_extractor/amplitude_table?${params}`);
+                const data = await res.json();
+                if (data.error) {
+                    resultDiv.innerHTML = `<p style="color:#f44336;">${data.error}</p>`;
+                    dteIndicator.textContent = '';
+                    return;
+                }
+                ampRows = data.rows || [];
+                if (!ampReferenceDteManual && data.reference_dte !== undefined) {
+                    document.getElementById('amp_reference_dte').value = data.reference_dte;
+                }
+                dteIndicator.textContent = ampRows.length
+                    ? `Spot: ${data.spot}  |  Trading days to expiry (holiday-aware): ${data.dte}  |  Reference DTE: ${data.reference_dte}${ampReferenceDteManual ? ' (manual)' : ' (auto: this expiry\'s own cycle length)'}`
+                    : '';
+                ampRenderTable();
+            } catch (err) {
+                resultDiv.innerHTML = `<p style="color:#f44336;">Request failed: ${err}</p>`;
+            }
+        }
+
+        function ampRenderTable() {
+            const resultDiv = document.getElementById('ampResult');
+            const positionsOnly = document.getElementById('amp_scope').value === 'true';
+            const correctionMultiplier = parseFloat(document.getElementById('amp_correction_multiplier').value) || 1.0;
+            const hardFloorPct = (parseFloat(document.getElementById('amp_hard_floor_pct').value) || 0) / 100;
+            const hardCeilingPct = (parseFloat(document.getElementById('amp_hard_ceiling_pct').value) || 90) / 100;
+
+            if (!ampRows.length) {
+                resultDiv.innerHTML = `<p style="color:#888;">${positionsOnly ? 'No open positions for this underlying/expiry.' : 'No strikes found.'}</p>`;
+                return;
+            }
+
+            const qtyHeader = positionsOnly ? '<th>Qty</th>' : '';
+            const rowsHtml = ampRows.map(r => {
+                const rawGapPct = Math.max(hardFloorPct, r.amplitude_pct * correctionMultiplier);
+                const suggestedGapPct = Math.min(hardCeilingPct, rawGapPct);
+                const capped = rawGapPct > hardCeilingPct;
+                const suggestedGapRupees = Math.round(r.ltp * suggestedGapPct * 10) / 10;
+                const qtyCell = positionsOnly ? `<td>${r.qty}</td>` : '';
+                return `
+                    <tr>
+                        <td>${r.tradingsymbol}</td>
+                        <td>${r.strike}</td>
+                        <td>${r.option_type}</td>
+                        ${qtyCell}
+                        <td>${r.ltp}</td>
+                        <td>${r.iv}%</td>
+                        <td>${r.delta}</td>
+                        <td>${r.gamma}</td>
+                        <td style="${capped ? 'color:#e67e22;' : ''}">${(r.amplitude_pct * 100).toFixed(2)}%${capped ? ' ⚠' : ''}</td>
+                        <td>${r.amplitude_multiplier}</td>
+                        <td style="font-weight:bold;">₹${suggestedGapRupees} (${(suggestedGapPct * 100).toFixed(2)}%)${capped ? ' <span style="color:#e67e22; font-weight:normal;" title="Raw amplitude exceeded the hard ceiling and was capped so the buy price stays positive">(capped)</span>' : ''}</td>
+                    </tr>`;
+            }).join('');
+
+            resultDiv.innerHTML = `
+                <table class="table table-bordered table-striped">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th><th>Strike</th><th>Type</th>${qtyHeader}
+                            <th>LTP</th><th>IV</th><th>Delta</th><th>Gamma</th>
+                            <th>Amplitude %</th><th>Amp. Multiplier</th><th>Suggested Buy/Sell Gap</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rowsHtml}</tbody>
+                </table>`;
+        }
 
 
 
@@ -1208,6 +1461,10 @@
                 <td><button class="btn btn-danger" onclick="removeRow(this)">X</button></td>
             `;
             tbody.appendChild(tr);
+            tr.querySelector('.symbol-input').addEventListener('blur', (e) => {
+                const symbol = e.target.value.trim();
+                if (symbol) applyGreeksGapToRow(symbol, tr);
+            });
         }
 
         function removeRow(btn) {
@@ -1261,7 +1518,9 @@
         // ── Delta Limits state ───────────────────────────────────────────────────
         let _deltaConfig = {};        // { NIFTY: { default:{min,max}, "2026-06-19":{min,max} }, … }
         let _upcomingExpiries = {};   // { NIFTY: ["2026-06-19","2026-06-26"], SENSEX: […], … }
-        let _liveDeltaMap = {};       // { NIFTY: {"2026-06-19": 1234.56}, SENSEX: {…}, … }
+        let _liveDeltaMap = {};       // { NIFTY: {"2026-06-19": 1234.56}, SENSEX: {…}, … } — merged view used for rendering
+        let _positionDeltaMap = {};   // base layer: from /api/delta_live_snapshot — covers every expiry with an open position
+        let _instanceDeltaMap = {};   // overlay: from running wave-extractor instances' own status files
 
         const DELTA_UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'];
         const DELTA_DEFAULT_LIMITS = {
@@ -1287,7 +1546,7 @@
             loadDeltaConfig();
         }
 
-        // Called from fetchStatus() on every status poll — overlays live delta without blocking on instances
+        // Called from fetchStatus() on every status poll — per-instance delta overlay
         function updateDeltaLiveData(statusList) {
             const newLiveMap = {};
             let hasAnyLive = false;
@@ -1310,7 +1569,7 @@
                 }
             }
 
-            _liveDeltaMap = newLiveMap;
+            _instanceDeltaMap = newLiveMap;
 
             const indicator = document.getElementById('deltaLiveIndicator');
             if (indicator) {
@@ -1318,6 +1577,38 @@
                 indicator.style.color = hasAnyLive ? '#28a745' : '#aaa';
             }
 
+            mergeAndRenderDeltaTable();
+        }
+
+        // Polled independently of running instances — covers every underlying/expiry
+        // with an open position (see delta_live_tracker.py + /api/delta_live_snapshot)
+        async function fetchDeltaLiveSnapshot() {
+            try {
+                const res = await fetch('/api/delta_live_snapshot');
+                const data = await res.json();
+                _positionDeltaMap = {
+                    NIFTY: data.NIFTY || {},
+                    BANKNIFTY: data.BANKNIFTY || {},
+                    SENSEX: data.SENSEX || {},
+                };
+                mergeAndRenderDeltaTable();
+            } catch (e) {
+                console.error('Failed to load delta live snapshot:', e);
+            }
+        }
+
+        // Position-based snapshot is the base layer; per-instance data (fresher,
+        // polled every 2 s) overlays on top so running-instance rows still update fastest.
+        function mergeAndRenderDeltaTable() {
+            const merged = {};
+            for (const underlying of DELTA_UNDERLYINGS) {
+                merged[underlying] = Object.assign(
+                    {},
+                    _positionDeltaMap[underlying] || {},
+                    _instanceDeltaMap[underlying] || {}
+                );
+            }
+            _liveDeltaMap = merged;
             renderDeltaTable();
         }
 
@@ -1332,8 +1623,18 @@
             const rowSpecs = [];
             for (const underlying of DELTA_UNDERLYINGS) {
                 rowSpecs.push({ underlying, expiry: 'default', isDefault: true, isFirst: true });
-                for (const exp of (_upcomingExpiries[underlying] || [])) {
+                const knownExpiries = new Set(_upcomingExpiries[underlying] || []);
+                for (const exp of knownExpiries) {
                     rowSpecs.push({ underlying, expiry: exp, isDefault: false, isFirst: false });
+                }
+                // Auto-add expiries that have an open position (live delta) but
+                // aren't in the "next 2 upcoming" list or delta_limits.json yet —
+                // they render with the underlying's inherited Default min/max.
+                const positionExpiries = Object.keys(_liveDeltaMap[underlying] || {}).sort();
+                for (const exp of positionExpiries) {
+                    if (knownExpiries.has(exp)) continue;
+                    rowSpecs.push({ underlying, expiry: exp, isDefault: false, isFirst: false });
+                    knownExpiries.add(exp);
                 }
             }
 
@@ -1493,6 +1794,201 @@
                 console.error('Failed to load wave_extractor config:', e);
                 document.getElementById('weSettingsBody').innerHTML =
                     `<p style="color:red;">Failed to load config: ${e.message}</p>`;
+            }
+        }
+
+        // ── Auto Gap by Underlying Move ──────────────────────────────────────────
+        function getUnderlyingFromSymbol(symbol) {
+            if (!symbol) return null;
+            if (symbol.startsWith('BANKNIFTY')) return 'BANKNIFTY';
+            if (symbol.startsWith('SENSEX')) return 'SENSEX';
+            if (symbol.startsWith('NIFTY') && !symbol.startsWith('NIFTYBEES')) return 'NIFTY';
+            return null;
+        }
+
+        async function openGapSettingsModal() {
+            document.getElementById('gapSettingsModal').style.display = 'block';
+            window.ModalManager && window.ModalManager.push(closeGapSettingsModal);
+            document.getElementById('gap-settings-status').textContent = '';
+            if (!Object.keys(_weConfig).length) {
+                await loadWeConfig();
+            }
+            renderGapSettingsModal();
+        }
+
+        function closeGapSettingsModal() {
+            window.ModalManager && window.ModalManager.remove(closeGapSettingsModal);
+            document.getElementById('gapSettingsModal').style.display = 'none';
+        }
+
+        function renderGapSettingsModal() {
+            const body = document.getElementById('gapSettingsBody');
+            let html = '';
+            WE_UNDERLYINGS.forEach(u => {
+                const movePoints = (_weConfig[u] || {}).gap_move_points || {};
+                html += `
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+                    <span style="width:90px; font-weight:600;">${u}</span>
+                    <label style="font-size:12px; color:#888;">Down (pts)
+                        <input type="number" id="gap_${u}_down" value="${movePoints.down ?? ''}" placeholder="25% default"
+                            style="width:90px; padding:3px 6px; border-radius:4px; border:1px solid #444; background:#1e1e1e; color:#e0e0e0; margin-left:4px;">
+                    </label>
+                    <label style="font-size:12px; color:#888;">Up (pts)
+                        <input type="number" id="gap_${u}_up" value="${movePoints.up ?? ''}" placeholder="25% default"
+                            style="width:90px; padding:3px 6px; border-radius:4px; border:1px solid #444; background:#1e1e1e; color:#e0e0e0; margin-left:4px;">
+                    </label>
+                </div>`;
+            });
+            body.innerHTML = html;
+        }
+
+        async function saveGapSettings() {
+            const statusEl = document.getElementById('gap-settings-status');
+            statusEl.style.color = '#888';
+            statusEl.textContent = 'Saving...';
+
+            const payload = {};
+            WE_UNDERLYINGS.forEach(u => {
+                const upVal = document.getElementById(`gap_${u}_up`).value;
+                const downVal = document.getElementById(`gap_${u}_down`).value;
+                payload[u] = {
+                    gap_move_points: (upVal !== '' && downVal !== '')
+                        ? { up: parseFloat(upVal), down: parseFloat(downVal) }
+                        : null,
+                };
+            });
+
+            try {
+                const res = await fetch('/api/wave_extractor/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                await loadWeConfig();
+                statusEl.style.color = '#2ecc71';
+                statusEl.textContent = 'Saved. Recomputing gaps for listed symbols...';
+
+                const updated = await refreshGapsForVisibleRows();
+                statusEl.textContent = `Saved. Updated gaps for ${updated} symbol(s).`;
+            } catch (e) {
+                console.error('Failed to save gap settings:', e);
+                statusEl.style.color = '#e74c3c';
+                statusEl.textContent = `Failed to save: ${e.message}`;
+            }
+        }
+
+        async function refreshGapsForVisibleRows() {
+            const rows = Array.from(document.querySelectorAll('#inputTable tbody tr'))
+                .map(row => ({ row, symbol: row.querySelector('.symbol-input').value.trim() }))
+                .filter(r => r.symbol);
+            if (!rows.length) return 0;
+
+            try {
+                const res = await fetch('/api/wave_extractor/suggest_gaps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbols: rows.map(r => r.symbol) }),
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                let updated = 0;
+                rows.forEach(({ row, symbol }) => {
+                    const result = (data.results || {})[symbol];
+                    if (result && result.source === 'greeks') {
+                        row.querySelector('.buy-gap-input').value = result.buy_gap;
+                        row.querySelector('.sell-gap-input').value = result.sell_gap;
+                        updated += 1;
+                    } else if (result && result.source === 'error') {
+                        console.warn(`suggest_gaps returned an error for ${symbol}: ${result.reason}`);
+                    }
+                });
+                return updated;
+            } catch (e) {
+                console.error('Failed to refresh greeks-based gaps:', e);
+                return 0;
+            }
+        }
+
+        async function refreshPercentGapsForVisibleRows() {
+            const rows = Array.from(document.querySelectorAll('#inputTable tbody tr'))
+                .map(row => ({ row, symbol: row.querySelector('.symbol-input').value.trim() }))
+                .filter(r => r.symbol);
+            if (!rows.length) return 0;
+
+            try {
+                const res = await fetch('/api/wave_extractor/suggest_gaps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbols: rows.map(r => r.symbol) }),
+                });
+                const data = await res.json();
+                if (data.error) throw new Error(data.error);
+
+                let updated = 0;
+                rows.forEach(({ row, symbol }) => {
+                    const result = (data.results || {})[symbol];
+                    if (result && typeof result.ltp === 'number' && result.ltp > 0) {
+                        row.querySelector('.buy-gap-input').value = calculateSmartGap(result.ltp, currentBuyGapPercent);
+                        row.querySelector('.sell-gap-input').value = calculateSmartGap(result.ltp, currentSellGapPercent);
+                        updated += 1;
+                    } else if (result && result.source === 'error') {
+                        console.warn(`suggest_gaps returned an error for ${symbol}: ${result.reason}`);
+                    }
+                });
+                return updated;
+            } catch (e) {
+                console.error('Failed to refresh percent-based gaps:', e);
+                return 0;
+            }
+        }
+
+        async function applyGreeksGapToRow(symbol, row) {
+            if (weGapMode !== 'auto') {
+                return applyPercentGapToRow(symbol, row);
+            }
+            const underlying = getUnderlyingFromSymbol(symbol);
+            if (!underlying || !(_weConfig[underlying] || {}).gap_move_points) return;
+
+            try {
+                const res = await fetch('/api/wave_extractor/suggest_gaps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbols: [symbol] }),
+                });
+                const data = await res.json();
+                const result = (data.results || {})[symbol];
+                if (result && result.source === 'greeks') {
+                    row.querySelector('.buy-gap-input').value = result.buy_gap;
+                    row.querySelector('.sell-gap-input').value = result.sell_gap;
+                } else if (result && result.source === 'error') {
+                    console.warn(`suggest_gaps returned an error for ${symbol}: ${result.reason}`);
+                }
+            } catch (e) {
+                console.error(`Failed to apply greeks-based gap for ${symbol}:`, e);
+            }
+        }
+
+        async function applyPercentGapToRow(symbol, row) {
+            try {
+                const res = await fetch('/api/wave_extractor/suggest_gaps', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ symbols: [symbol] }),
+                });
+                const data = await res.json();
+                const result = (data.results || {})[symbol];
+                if (result && typeof result.ltp === 'number' && result.ltp > 0) {
+                    row.querySelector('.buy-gap-input').value = calculateSmartGap(result.ltp, currentBuyGapPercent);
+                    row.querySelector('.sell-gap-input').value = calculateSmartGap(result.ltp, currentSellGapPercent);
+                } else if (result && result.source === 'error') {
+                    console.warn(`suggest_gaps returned an error for ${symbol}: ${result.reason}`);
+                }
+            } catch (e) {
+                console.error(`Failed to apply percent-based gap for ${symbol}:`, e);
             }
         }
 
@@ -2689,6 +3185,7 @@
             const rawModal = document.getElementById('rawModal');
             const restartModal = document.getElementById('restartModal');
             const lpModal = document.getElementById('loadPositionsModal');
+            const gapModal = document.getElementById('gapSettingsModal');
 
             if (event.target == logModal) {
                 closeLogModal();
@@ -2701,6 +3198,9 @@
             }
             if (event.target == lpModal) {
                 closeLoadPositionsModal();
+            }
+            if (event.target == gapModal) {
+                closeGapSettingsModal();
             }
         }
 
@@ -3128,6 +3628,8 @@
                 targetRow.querySelector('.buy-gap-input').value = smartBuyGap;
                 targetRow.querySelector('.sell-gap-input').value = smartSellGap;
             }
+            // Overwrite with greeks-based gap if this underlying has move points configured
+            applyGreeksGapToRow(pos.symbol, targetRow);
 
             // Request Token: Leave EMPTY as requested
             targetRow.querySelector('.token-input').value = '';
