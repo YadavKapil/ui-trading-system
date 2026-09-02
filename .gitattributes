@@ -1,0 +1,2 @@
+# Preserve upstream vendored JavaScript bytes on every platform.
+static/vendor/**/*.js text eol=lf
