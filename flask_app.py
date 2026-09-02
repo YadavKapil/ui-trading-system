@@ -50,6 +50,7 @@ from kite_api_monitor import (
     get_monitor_stats,
     get_history_for_date,
     get_available_dates,
+    sanitize_monitor_data,
     reset_stats as _reset_monitor_stats,
     invalidate_positions_cache,
 )
@@ -871,8 +872,8 @@ def api_monitor_data():
     """
     date_param = request.args.get("date", "").strip()
     if date_param:
-        return jsonify(get_history_for_date(date_param))
-    return jsonify(get_monitor_stats())
+        return jsonify(sanitize_monitor_data(get_history_for_date(date_param)))
+    return jsonify(sanitize_monitor_data(get_monitor_stats()))
 
 
 @app.route("/api/api-monitor-dates")

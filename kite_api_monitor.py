@@ -19,16 +19,20 @@ Usage:
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +105,306 @@ _NON_HTTP_METHODS: frozenset[str] = frozenset({
     "set_access_token",
     "login_url",
 })
+
+_AUTH_METHODS: frozenset[str] = frozenset({
+    "generate_session",
+    "renew_access_token",
+    "invalidate_access_token",
+})
+
+_REDACTED = "[REDACTED]"
+_AUTH_ARGS_OMITTED = "<authentication arguments omitted>"
+_AUTH_ERROR_OMITTED = "<authentication error details omitted>"
+_SENSITIVE_NAMES: frozenset[str] = frozenset({
+    "api_secret",
+    "request_token",
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "proxy_authorization",
+    "x_authorization",
+    "x_api_key",
+    "x_auth_token",
+    "api_key",
+    "token",
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "checksum",
+    "authentication",
+    "www_authenticate",
+    "cookie",
+    "set_cookie",
+})
+_SENSITIVE_COMPACT_NAMES: frozenset[str] = frozenset(
+    item.replace("_", "") for item in _SENSITIVE_NAMES
+)
+_SENSITIVE_COMPONENTS: frozenset[str] = frozenset({
+    "token",
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "checksum",
+    "authorization",
+    "authentication",
+})
+_SENSITIVE_TEXT_NAMES = (
+    r"api[_-]?secret|request[_-]?token|access[_-]?token|refresh[_-]?token|"
+    r"proxy[_-]?authorization|x[_-]?authorization|x[_-]?api[_-]?key|"
+    r"x[_-]?auth[_-]?token|api[_-]?key|authorization|token|password|passwd|"
+    r"passphrase|secret|checksum|authentication|www[_-]?authenticate|"
+    r"set[_-]?cookie|cookie"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    rf"""(?ix)
+    (?<![a-z0-9])
+    (?P<prefix>
+        (?P<quote>["']?)
+        (?:{_SENSITIVE_TEXT_NAMES})
+        (?P=quote)
+        (?![a-z0-9])
+        \s*[:=]\s*
+    )
+    (?P<value>
+        "(?:\\.|[^"])*"
+        |
+        '(?:\\.|[^'])*'
+        |
+        [^,\r\n&}}\]]+
+    )
+    """
+)
+_AUTH_SCHEME_RE = re.compile(
+    r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+"
+)
+
+
+def _normalise_name(name: Any) -> tuple[str, set[str]]:
+    """Return a comparable sensitive-field name and its word components."""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(name)).lower()
+    components = {part for part in re.split(r"[^a-z0-9]+", text) if part}
+    return "_".join(re.findall(r"[a-z0-9]+", text)), components
+
+
+def _is_sensitive_name(name: Any) -> bool:
+    """Return whether a mapping key or header name identifies a credential."""
+    normalised, components = _normalise_name(name)
+    compact = normalised.replace("_", "")
+    return (
+        compact in _SENSITIVE_COMPACT_NAMES
+        or bool(components & _SENSITIVE_COMPONENTS)
+        or compact.endswith(("apikey", "authtoken"))
+    )
+
+
+def _redact_url(value: str) -> str:
+    """Redact credentials and sensitive query parameters in a URL-like string."""
+    try:
+        parsed = urlsplit(value)
+    except (TypeError, ValueError):
+        return value
+
+    if not parsed.scheme or not parsed.netloc:
+        return value
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        host = netloc.rsplit("@", 1)[1]
+        netloc = f"{_REDACTED}@{host}"
+
+    query = urlencode(
+        [
+            (key, _REDACTED if _is_sensitive_name(key) else _sanitize_text(item))
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ],
+        doseq=True,
+    )
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+
+
+def _sanitize_text(value: str, secret_values: tuple[str, ...] = ()) -> str:
+    """Redact credentials from free-form text without including them in errors."""
+    sanitized = value
+    for secret_value in secret_values:
+        if len(secret_value) >= 4:
+            sanitized = sanitized.replace(secret_value, _REDACTED)
+
+    stripped = sanitized.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            decoded = json.loads(sanitized)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        else:
+            return json.dumps(
+                sanitize_monitor_data(decoded, secret_values=secret_values),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            )
+
+    sanitized = _redact_url(sanitized)
+    sanitized = _SENSITIVE_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group('prefix')}{_REDACTED!r}",
+        sanitized,
+    )
+    return _AUTH_SCHEME_RE.sub(lambda match: f"{match.group(1)} {_REDACTED}", sanitized)
+
+
+def sanitize_monitor_data(
+    value: Any,
+    *,
+    secret_values: tuple[str, ...] = (),
+    _seen: set[int] | None = None,
+    _depth: int = 0,
+) -> Any:
+    """Recursively redact credentials and return JSON-serializable monitor data.
+
+    This is the sole sanitizer for captured calls, SQLite persistence, legacy
+    row migration, and dashboard responses. It intentionally never logs the
+    value being sanitized, including when an object's representation fails.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if _depth > 20:
+        return "<maximum depth exceeded>"
+    if isinstance(value, str):
+        return _sanitize_text(value, secret_values)
+    if isinstance(value, bytes):
+        return _sanitize_text(value.decode("utf-8", errors="replace"), secret_values)
+    if isinstance(value, BaseException):
+        return _sanitize_text(
+            f"{type(value).__name__}: {value}",
+            secret_values,
+        )
+
+    if _seen is None:
+        _seen = set()
+    value_id = id(value)
+    if value_id in _seen:
+        return "<circular reference>"
+
+    if isinstance(value, Mapping):
+        _seen.add(value_id)
+        try:
+            is_auth_record = str(value.get("method", "")) in _AUTH_METHODS
+            return {
+                str(key): (
+                    (
+                        _AUTH_ARGS_OMITTED
+                        if str(key) in {"args", "args_repr"}
+                        else _AUTH_ERROR_OMITTED
+                    )
+                    if is_auth_record
+                    and (
+                        str(key) in {"args", "args_repr"}
+                        or (str(key) == "error" and item)
+                    )
+                    else (
+                        _REDACTED
+                        if _is_sensitive_name(key)
+                        else sanitize_monitor_data(
+                            item,
+                            secret_values=secret_values,
+                            _seen=_seen,
+                            _depth=_depth + 1,
+                        )
+                    )
+                )
+                for key, item in value.items()
+            }
+        finally:
+            _seen.remove(value_id)
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        _seen.add(value_id)
+        try:
+            return [
+                sanitize_monitor_data(
+                    item,
+                    secret_values=secret_values,
+                    _seen=_seen,
+                    _depth=_depth + 1,
+                )
+                for item in value
+            ]
+        finally:
+            _seen.remove(value_id)
+
+    try:
+        representation = repr(value)
+    except Exception:  # noqa: BLE001
+        return f"<unserializable {type(value).__name__}>"
+    return _sanitize_text(representation, secret_values)
+
+
+def _collect_secret_values(method: str, args: tuple, kwargs: dict) -> tuple[str, ...]:
+    """Collect known credential values so exception text can be scrubbed."""
+    secrets: list[str] = []
+    seen: set[int] = set()
+
+    def collect(value: Any, sensitive: bool = False) -> None:
+        if isinstance(value, (str, bytes)):
+            text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+            stripped = text.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    decoded = json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                else:
+                    collect(decoded, sensitive)
+            if text:
+                if sensitive:
+                    secrets.append(text)
+            return
+
+        value_id = id(value)
+        if value_id in seen:
+            return
+        if isinstance(value, Mapping):
+            seen.add(value_id)
+            try:
+                for key, item in value.items():
+                    collect(item, sensitive or _is_sensitive_name(key))
+            finally:
+                seen.remove(value_id)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            seen.add(value_id)
+            try:
+                for item in value:
+                    collect(item, sensitive)
+            finally:
+                seen.remove(value_id)
+
+    if method in _AUTH_METHODS:
+        collect(args, sensitive=True)
+        collect(kwargs, sensitive=True)
+    else:
+        collect(kwargs)
+        collect(args)
+    return tuple(dict.fromkeys(secrets))
+
+
+def _sanitize_error(
+    method: str,
+    error: str | None,
+    secret_values: tuple[str, ...] = (),
+) -> str | None:
+    """Return safe error text, suppressing all authentication error details."""
+    if not error:
+        return None
+    if method in _AUTH_METHODS:
+        return _AUTH_ERROR_OMITTED
+    return _sanitize_text(error, secret_values)
+
+
+def _sanitize_args_repr(method: str, args_repr: str) -> str:
+    """Return safe stored argument text, omitting all authentication arguments."""
+    if method in _AUTH_METHODS:
+        return _AUTH_ARGS_OMITTED
+    return _sanitize_text(args_repr)
 
 # ---------------------------------------------------------------------------
 # TTL result cache — deduplicates repeated calls within a short window
@@ -181,6 +485,77 @@ def _init_db() -> None:
         logger.error("KiteAPIMonitor: DB init failed — %s", exc)
 
 
+_WAL_CHECKPOINT_RETRIES = 5
+_WAL_CHECKPOINT_RETRY_DELAY = 0.05
+
+
+def _checkpoint_wal(
+    conn: sqlite3.Connection,
+    *,
+    retries: int = _WAL_CHECKPOINT_RETRIES,
+    retry_delay: float = _WAL_CHECKPOINT_RETRY_DELAY,
+) -> None:
+    """Truncate the WAL, retrying busy checkpoints and validating completion."""
+    for attempt in range(retries):
+        result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if result is None or len(result) < 3:
+            raise RuntimeError("SQLite returned an invalid WAL checkpoint result")
+        if int(result[0]) == 0:
+            return
+        if attempt + 1 < retries:
+            time.sleep(retry_delay)
+    raise RuntimeError(f"SQLite WAL checkpoint remained busy after {retries} attempts")
+
+
+def _sanitize_existing_records() -> None:
+    """Rewrite legacy monitor rows in place, preserving non-sensitive history.
+
+    Secure deletion plus a compact/checkpoint removes superseded credential
+    bytes from SQLite pages and WAL files after the logical rows are updated.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = _db_connect()
+        conn.execute("PRAGMA secure_delete=ON")
+        rows = conn.execute(
+            "SELECT id, method, args_repr, error FROM api_calls"
+        ).fetchall()
+        updates: list[tuple[str, str | None, int]] = []
+        for row in rows:
+            args_repr = _sanitize_args_repr(row["method"], row["args_repr"])
+            error = _sanitize_error(row["method"], row["error"])
+            if args_repr != row["args_repr"] or error != row["error"]:
+                updates.append((args_repr, error, row["id"]))
+        if updates:
+            conn.executemany(
+                "UPDATE api_calls SET args_repr = ?, error = ? WHERE id = ?",
+                updates,
+            )
+            conn.commit()
+            logger.info(
+                "KiteAPIMonitor: sanitized %d legacy DB records in place",
+                len(updates),
+            )
+        else:
+            conn.commit()
+
+        # Always complete physical cleanup. A previous run may have committed
+        # logical updates but failed before truncating the WAL or compacting.
+        _checkpoint_wal(conn)
+        conn.execute("VACUUM")
+        _checkpoint_wal(conn)
+    except Exception:
+        logger.critical(
+            "KiteAPIMonitor: credential migration cleanup failed; refusing startup"
+        )
+        raise RuntimeError(
+            "Kite API monitor credential migration cleanup failed; refusing startup"
+        ) from None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _db_purge_old_records() -> None:
     """Delete records older than _HISTORY_DAYS days from SQLite.
 
@@ -202,22 +577,25 @@ def _db_insert_batch(records: list[CallRecord]) -> None:
     Args:
         records: Records to persist.
     """
-    rows = [
-        (
-            r.timestamp_epoch,
-            r.timestamp_ist,
-            r.timestamp_ist[:10],   # "YYYY-MM-DD" date part
-            r.method,
-            r.caller_file,
-            r.caller_function,
-            r.caller_line,
-            r.args_repr,
-            r.elapsed_ms,
-            r.error,
-            int(r.is_429),
+    rows = []
+    for record in records:
+        args_repr = _sanitize_args_repr(record.method, record.args_repr)
+        error = _sanitize_error(record.method, record.error)
+        rows.append(
+            (
+                record.timestamp_epoch,
+                record.timestamp_ist,
+                record.timestamp_ist[:10],   # "YYYY-MM-DD" date part
+                record.method,
+                record.caller_file,
+                record.caller_function,
+                record.caller_line,
+                args_repr,
+                record.elapsed_ms,
+                error,
+                int(record.is_429),
+            )
         )
-        for r in records
-    ]
     try:
         conn = _db_connect()
         conn.executemany(_INSERT_SQL, rows)
@@ -302,9 +680,9 @@ def _load_from_db() -> None:
                 caller_file=row["caller_file"],
                 caller_function=row["caller_function"],
                 caller_line=row["caller_line"],
-                args_repr=row["args_repr"],
+                args_repr=_sanitize_args_repr(row["method"], row["args_repr"]),
                 elapsed_ms=row["elapsed_ms"],
-                error=row["error"],
+                error=_sanitize_error(row["method"], row["error"]),
                 is_429=bool(row["is_429"]),
             )
             _call_history.append(record)
@@ -380,7 +758,12 @@ def _make_cache_key(method: str, args: tuple, kwargs: dict, account_id: str = ""
     return f"{account_id}|{method}|{args!r}|{sorted(kwargs.items())!r}"
 
 
-def _safe_args_repr(method: str, args: tuple, kwargs: dict) -> str:
+def _safe_args_repr(
+    method: str,
+    args: tuple,
+    kwargs: dict,
+    secret_values: tuple[str, ...] = (),
+) -> str:
     """Produce a short, safe string representation of positional / keyword args.
 
     For quote / ltp calls the symbol list is the most useful thing to show.
@@ -394,12 +777,19 @@ def _safe_args_repr(method: str, args: tuple, kwargs: dict) -> str:
     Returns:
         A human-readable string, ≤ 200 characters.
     """
+    if method in _AUTH_METHODS:
+        return _AUTH_ARGS_OMITTED
+
     try:
-        parts: list[str] = [repr(a) for a in args] + [f"{k}={repr(v)}" for k, v in kwargs.items()]
+        safe_args = sanitize_monitor_data(args, secret_values=secret_values)
+        safe_kwargs = sanitize_monitor_data(kwargs, secret_values=secret_values)
+        parts: list[str] = [repr(a) for a in safe_args] + [
+            f"{key}={value!r}" for key, value in safe_kwargs.items()
+        ]
         combined = ", ".join(parts)
         if len(combined) > 200:
             combined = combined[:197] + "..."
-        return combined
+        return _sanitize_text(combined, secret_values)
     except Exception:  # noqa: BLE001
         return "<args repr failed>"
 
@@ -423,7 +813,9 @@ def _record_call(
         kwargs: Keyword arguments to the method.
     """
     caller_file, caller_function, caller_line = caller
+    secret_values = _collect_secret_values(method, args, kwargs)
     is_429 = _is_429(error)
+    sanitized_error = _sanitize_error(method, error, secret_values)
     now = time.time()
     now_ist_dt = datetime.fromtimestamp(now, tz=_IST)
     now_ist = now_ist_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -435,9 +827,9 @@ def _record_call(
         caller_file=caller_file,
         caller_function=caller_function,
         caller_line=caller_line,
-        args_repr=_safe_args_repr(method, args, kwargs),
+        args_repr=_safe_args_repr(method, args, kwargs, secret_values),
         elapsed_ms=round(elapsed_ms, 1),
-        error=error,
+        error=sanitized_error,
         is_429=is_429,
     )
 
@@ -450,7 +842,7 @@ def _record_call(
         ms = _method_stats[method]
         ms.total_calls += 1
         ms.total_elapsed_ms += elapsed_ms
-        if error:
+        if sanitized_error:
             ms.error_count += 1
         if is_429:
             ms.count_429 += 1
@@ -541,7 +933,7 @@ def get_monitor_stats() -> dict[str, Any]:
             for r in recent
         ]
 
-    return {
+    return sanitize_monitor_data({
         "recent_calls": recent_rows,
         "method_stats": method_rows,
         "top_sites": top_sites,
@@ -554,7 +946,7 @@ def get_monitor_stats() -> dict[str, Any]:
                 "%Y-%m-%d %H:%M:%S IST"
             ),
         },
-    }
+    })
 
 
 def get_history_for_date(date_ist: str) -> dict[str, Any]:
@@ -588,10 +980,10 @@ def get_history_for_date(date_ist: str) -> dict[str, Any]:
             "file": row["caller_file"],
             "function": row["caller_function"],
             "line": row["caller_line"],
-            "args": row["args_repr"],
+            "args": _sanitize_args_repr(row["method"], row["args_repr"]),
             "ms": row["elapsed_ms"],
             "ok": row["error"] is None,
-            "error": row["error"] or "",
+            "error": _sanitize_error(row["method"], row["error"]) or "",
             "is_429": bool(row["is_429"]),
         }
         for row in rows
@@ -653,7 +1045,7 @@ def get_history_for_date(date_ist: str) -> dict[str, Any]:
     total_429 = sum(v["count_429"] for v in method_agg.values())
     total_errors = sum(v["error_count"] for v in method_agg.values())
 
-    return {
+    return sanitize_monitor_data({
         "recent_calls": recent_calls,
         "method_stats": method_rows,
         "top_sites": top_sites,
@@ -663,7 +1055,7 @@ def get_history_for_date(date_ist: str) -> dict[str, Any]:
             "total_errors": total_errors,
             "date": date_ist,
         },
-    }
+    })
 
 
 def get_available_dates() -> list[str]:
@@ -839,5 +1231,6 @@ class MonitoredKite:
 # ---------------------------------------------------------------------------
 
 _init_db()
+_sanitize_existing_records()
 _load_from_db()
 _start_writer_thread()
