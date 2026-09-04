@@ -33,4 +33,3 @@ def approve_golden(actual: str | Path, golden: str | Path, *, explicit: bool) ->
     golden.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(actual, golden)
     return golden
-

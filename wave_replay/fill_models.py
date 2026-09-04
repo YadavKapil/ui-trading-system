@@ -48,4 +48,3 @@ def ohlc_touch(*, side: str, limit_price: Decimal, high: Decimal, low: Decimal) 
 def validate_sibling_bracket(buy_limit: Decimal, sell_limit: Decimal) -> None:
     if buy_limit >= sell_limit:
         raise ValueError("INVALID_OVERLAPPING_BRACKET")
-

@@ -163,4 +163,3 @@ class FakeModuleInstaller:
                     sys.modules.pop(name, None)
                 else:
                     sys.modules[name] = previous
-

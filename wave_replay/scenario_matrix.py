@@ -39,4 +39,3 @@ def matrix_by_category() -> dict[str, tuple[CharacterizationCase, ...]]:
     for case in CHARACTERIZATION_MATRIX:
         categories.setdefault(case.category, []).append(case)
     return {category: tuple(cases) for category, cases in categories.items()}
-

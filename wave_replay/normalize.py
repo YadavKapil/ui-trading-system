@@ -64,4 +64,3 @@ class StableIds:
             self._counts[category] = self._counts.get(category, 0) + 1
             self._aliases[key] = f"{category.upper()}-{self._counts[category]}"
         return self._aliases[key]
-

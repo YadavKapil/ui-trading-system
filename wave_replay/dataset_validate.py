@@ -30,4 +30,3 @@ class ValidationReport:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.to_mapping(), indent=2, sort_keys=True), encoding="utf-8")
         return path
-

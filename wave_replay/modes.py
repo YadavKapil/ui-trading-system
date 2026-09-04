@@ -30,4 +30,3 @@ class ApprovedDefaults:
 
 
 APPROVED_DEFAULTS = ApprovedDefaults()
-

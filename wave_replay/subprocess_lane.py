@@ -19,4 +19,3 @@ def run_boundary_probe(repository_root: str | Path) -> dict:
     ]
     completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=60)
     return json.loads(completed.stdout)
-

@@ -19,4 +19,3 @@ def function_inventory(path: str | Path) -> list[dict[str, object]]:
         for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
-

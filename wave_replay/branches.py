@@ -36,4 +36,3 @@ class BranchSet:
             self.branches.pop()
             self.pruned += 1
         return branch
-

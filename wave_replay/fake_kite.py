@@ -66,4 +66,3 @@ class FakeKite:
         if exchange is None:
             return list(self._instruments)
         return [item for item in self._instruments if item.get("exchange") == exchange]
-
