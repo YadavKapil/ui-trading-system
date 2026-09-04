@@ -227,14 +227,18 @@ indian-wheel Upstox raw cache + LEAN archives
                   \                       /
                    \                     /
                     v                   v
+                 Hermetic pre-import bootstrap
+                              |
+                              v
                     Deterministic scheduler
                     /         |          \
                    v          v           v
-             Fake clock   Fake ticker   Fault script
+             Fake clock  SimTaskRuntime  Fault script
                    \          |           /
-                    \         v          /
-                     Legacy Wave runner
-                    (existing code path)
+                    \     Fake ticker     /
+                     \        |          /
+                      Legacy Wave runner
+                (fresh worker module namespace)
                               |
                               v
                    Narrow Fake Kite adapter
@@ -251,7 +255,7 @@ indian-wheel Upstox raw cache + LEAN archives
                                   clean core        LEAN adapter
 ```
 
-The `indian-wheel` exporter owns source-format interpretation and provenance. The Wave repository owns validation, bar-to-event conversion, scheduling, broker simulation, and strategy execution. The scheduler owns simulated time and causality. The fake broker owns broker truth. The legacy worker owns the same process-local globals it owns today. The trace recorder observes both without deciding strategy behavior.
+The `indian-wheel` exporter owns source-format interpretation and provenance. The Wave repository owns validation, bar-to-event conversion, hermetic bootstrap, cooperative task execution, scheduling, broker simulation, and strategy execution. The bootstrap establishes filesystem, import, network, database, time, and concurrency isolation **before** Wave code is imported. The scheduler owns simulated time and causality. `SimTaskRuntime` ensures no deterministic callback, timer, delayed refresh, or ticker handler runs on an OS thread. The fake broker owns broker truth. Each legacy worker owns a distinct module graph and process-local state container. The trace recorder observes all of these without deciding strategy behavior.
 
 ### 6.2 Proposed file layout
 
@@ -284,12 +288,18 @@ wave_replay/
   datasets.py               # portable export loader and schema-version gate
   dataset_validate.py       # hash, partition, timestamp, and coverage checks
   market_events.py          # bars -> scheduler availability events
+  bootstrap.py              # pre-import sandbox, import fakes, network denial, reset
+  sandbox.py                # isolated source/config/runtime/SQLite filesystem layout
   modes.py                  # legacy/corrected/lean mode and compatibility flags
   schemas.py                # typed scenario, event, order, state, and trace records
   scheduler.py              # stable discrete-event queue and task wakeups
+  tasks.py                  # SimTaskRuntime, Thread/Timer/join/liveness interception
   clock.py                  # SimClock and legacy time patching
-  legacy_runner.py          # isolated execution of current ticker/common_lib path
+  legacy_runner.py          # cooperative oracle and non-golden process validation lane
+  worker_loader.py          # fresh worker-scoped module graphs and reset/unload
   seams.py                  # minimal broker/clock/filesystem callback injection
+  import_fakes.py           # fake kite/monitor/memcache/notification/ticker modules
+  network_guard.py          # fail-closed socket/DNS/HTTP interception
   fake_kite.py              # narrow KiteConnect-compatible facade
   fake_ticker.py            # connect/reconnect and callback delivery
   broker_engine.py          # order/GTT/position state machines
@@ -319,6 +329,9 @@ tests/
     test_multi_instance.py
     test_persistence_and_status.py
   replay/wave/
+    test_bootstrap_preflight.py
+    test_task_runtime.py
+    test_worker_namespaces.py
     test_scheduler.py
     test_fake_broker.py
     test_fill_models.py
@@ -335,20 +348,42 @@ tests/
 
 If repository conventions favor `simulation/` over `wave_replay/`, preserve the internal separation. Do not put the fake broker into `common_lib.py`. Full historical exports remain gitignored in both repositories; they are addressed by `dataset_id` and manifest hash, transferred as an artifact or copied explicitly, and never located by traversing to `..\indian-wheel`.
 
-### 6.3 Minimal seams around existing code
+### 6.3 Pre-import bootstrap
 
-Phase 1 should use monkeypatching and dependency substitution around the current module, not move decision logic:
+`wave_replay.bootstrap.ReplayBootstrap` is mandatory for every deterministic run. It executes before importing `common_lib.py`, `ticker_single_scraper_new.py`, `flask_app.py`, or any module that imports them:
 
-- replace the module-global `kite` with `FakeKite`;
-- replace ticker construction with `FakeKiteTicker`;
-- redirect status/config/executed-order paths to a scenario sandbox;
-- replace time sources and sleeps with `SimClock`;
-- seed or replace random tag generation deterministically;
-- use a versioned instrument-cache fixture or scenario SQLite database;
-- capture logs and notification dispatches as trace events;
-- invoke the ticker startup/loop through a runner that can stop after a defined event or simulated time.
+1. Create a unique temporary sandbox and make it the working directory.
+2. Materialize a scenario-owned import root containing the exact hashed Wave-reachable source snapshot, so module-relative `__file__` paths resolve inside the sandbox rather than the production checkout.
+3. Write scenario-owned `configfile.ini` with fake canary credentials and an explicit `live_trading` value. `live_trading=true` is allowed only because all broker/network imports are already fake; dry-run scenarios set it false explicitly.
+4. Set a minimal allowlisted environment and remove real token/key/home/runtime variables.
+5. Install fail-closed socket, DNS, HTTP, WebSocket, Twisted, and broker transport guards.
+6. Pre-register deterministic/fake modules in `sys.modules`: `kiteconnect.KiteConnect`/`KiteTicker` and exception types; `kite_api_monitor.MonitoredKite` and cache hooks; `pymemcache.client.base.Client`; `notifications.service.dispatch`; and Wave-reachable Twisted/Autobahn/requests transport entry points. Fake modules preserve the narrow interfaces and constants consumed by Wave but cannot open a transport.
+7. Patch `threading.Thread`, `threading.Timer`, direct `_thread` starts, time, randomness, and ticker delivery to scheduler-owned implementations.
+8. Configure scenario-owned SQLite paths/fixtures for instruments, API-monitor state, GTT tags, and trade/executed-order state. Wrap `sqlite3.connect` before import to reject non-sandbox paths and record sandbox-relative database creation, schema migration, WAL/SHM/journal creation, and call site.
+9. Create isolated status, log, executed-order, Wave config, delta-limit, spot-bridge, and temporary paths.
+10. Clear prior worker modules/import caches, then import Wave code through the worker loader.
+11. Inject `FakeKite`, `FakeTicker`, `SimClock`, `SimTaskRuntime`, persistence sinks, and trace hooks before executing startup.
 
-After characterization tests are green, introduce a small formal `BrokerPort` and `ClockPort` only if needed. First prove that the seam produces the same calls as direct monkeypatching.
+Any attempt to import or construct a real broker/network client fails preflight. Any socket, DNS, HTTP, or WebSocket operation not registered with the fake transport emits a sanitized `UNEXPECTED_NETWORK_ACCESS` event containing only transport category and sandbox-relative call site, never hostnames, URLs, headers, tokens, payloads, or arguments, then fails the run.
+
+Memcache is forced to a scenario fixture (`disabled`, `miss`, `hit`, or scripted error) before import. The run must never probe `localhost:11211` or infer behavior from machine state.
+
+At teardown, close SQLite connections, checkpoint/delete sandbox WAL/SHM artifacts, unload every worker-scoped module, restore host imports/environment/cwd, scan all trace/log/error artifacts for canary secrets, and remove the sandbox. A failed cleanup is a test failure. No replay reads or writes the real repository's runtime files, user home, configured databases, credentials, status, or logs.
+
+### 6.4 Cooperative execution seams
+
+The deterministic oracle uses the current decision code through bootstrap-installed substitution, not moved/copied strategy logic:
+
+- module-global `kite` resolves to `FakeKite`, and ticker construction resolves to `FakeTicker`;
+- all status/config/executed-order paths resolve to the scenario sandbox;
+- all time sources and sleeps resolve to `SimClock`;
+- all Wave-reachable thread/timer creation and ticker callbacks resolve to `SimTaskRuntime`;
+- random tag generation is seeded;
+- instrument/cache/database state comes from scenario fixtures;
+- logs and notification dispatches become sanitized trace events;
+- the ticker startup/loop runs as cooperative tasks until a declared event/time/end condition.
+
+After characterization tests are green, introduce a small formal `BrokerPort`, `ClockPort`, or `TaskPort` only if needed. First prove each port produces the same cooperative trace as direct bootstrap substitution.
 
 ## 7. Interfaces and schemas
 
@@ -379,7 +414,31 @@ The legacy bridge must route all of the following to one timeline:
 
 `SimClock.sleep()` must suspend only the calling simulated task. Other callbacks and broker events at earlier timestamps continue to run.
 
-### 7.2 Narrow broker interface
+### 7.2 Cooperative task interface
+
+```python
+class TaskRuntimePort(Protocol):
+    def spawn(self, target, *, name: str, args=(), kwargs=None, daemon=False): ...
+    def schedule_timer(self, delay: float, target, *, args=(), kwargs=None): ...
+    def join(self, task_id: str, timeout: float | None = None) -> None: ...
+    def is_alive(self, task_id: str) -> bool: ...
+    def cancel(self, task_id: str) -> bool: ...
+```
+
+`SimTaskRuntime` patches `threading.Thread` and `threading.Timer` before Wave import:
+
+- The initial substrate is one host OS thread running stackful `greenlet` tasks. This preserves arbitrary legacy Python call stacks across patched `time.sleep()`, broker waits, joins, and callback yield points without rewriting Wave functions as generators. Only the scheduler calls `greenlet.switch()`.
+- `Thread.start()` never calls the OS. It validates one-start-only semantics, assigns a stable synthetic `ident`, and registers the target as a scheduler task at the current simulated timestamp.
+- `Timer.start()` registers a scheduler event at `now + interval`; `cancel()` deterministically suppresses an event that has not begun.
+- `join()` called by a cooperative task blocks that task and lets the scheduler run other eligible events until the target completes or simulated timeout expires. A harness-side `join()` drives the scheduler under the same rule.
+- `is_alive()` is true for `scheduled`, `running`, `sleeping`, or `blocked` tasks and false for `completed`, `cancelled`, or `failed`.
+- `daemon`, name, parent task, start/join/cancel timestamps, wake reason, and terminal exception are trace fields; daemon status never changes deterministic shutdown.
+- direct `_thread.start_new_thread`, unregistered executors, and any other Wave-reachable concurrency primitive fail closed unless explicitly adapted.
+- cooperative locks used by Wave are scheduler-aware and surface deterministic deadlock rather than blocking the host interpreter.
+
+`FakeTicker` never invokes callbacks on its own stack or a socket thread. It schedules callback tasks with explicit timestamp, priority, parent event, and insertion sequence. Nested callbacks are delivered only at declared scheduler yield points, which allows re-entrant/drop behavior around `already_updating_order` to be reproduced deliberately. The five-second delayed status-refresh `Thread` in `on_order_update`, callback handlers, poll-loop work, timers, and any future Wave-reachable thread target all use the same runtime.
+
+### 7.3 Narrow broker interface
 
 Implement only the Kite surface reached by Wave:
 
@@ -399,7 +458,7 @@ class WaveBrokerPort(Protocol):
 
 The `FakeKite` compatibility facade also exposes exactly the constants read by current code and token/session methods used at startup. Any unexpected method or missing field must fail the scenario with a clear "outside Wave contract" error. Do not return permissive `MagicMock` values.
 
-### 7.3 Scenario schema
+### 7.4 Scenario schema
 
 Use YAML for reviewable scenarios and JSONL/Parquet for large event streams. A scenario includes:
 
@@ -456,7 +515,7 @@ expected:
 
 Reject scenarios with implicit current date, unpinned config, missing exchange, unversioned instrument or market data, a manifest hash mismatch, an undeclared dataset partition, or a non-deterministic seed.
 
-### 7.4 Portable historical dataset contract
+### 7.5 Portable historical dataset contract
 
 The cross-repository contract is `wave-replay-dataset-v1`. Parquet stores typed, columnar bars and contract metadata; `manifest.json` is the authoritative inventory and provenance record. The consumer must reject unknown major schema versions and may accept backward-compatible minor additions.
 
@@ -527,7 +586,7 @@ Portfolio-delta replay requires the underlying spot and a synchronized available
 
 Never forward-fill an option trade bar. A stale option close can materially change Greeks and restrictions and must remain missing. Do not carry a stale underlying into historical Wave decisions either; use the same declared missing-quote policy. Every delta snapshot records the bar IDs and source hashes used for each leg.
 
-### 7.5 Input event schema
+### 7.6 Input event schema
 
 Every event has:
 
@@ -556,7 +615,7 @@ Required input event types:
 
 Historical market events come only from the exported dataset and its declared partitions. Broker/fault events come from the scenario script. Their causal streams share the scheduler but retain separate provenance.
 
-### 7.6 Canonical output trace schema
+### 7.7 Canonical output trace schema
 
 Write one JSON object per line:
 
@@ -630,6 +689,7 @@ This ordering is only the default. Callback permutation scenarios must explicitl
 Scheduler requirements:
 
 - no real sleeping;
+- no real OS thread, timer thread, ticker/network callback thread, or delayed-refresh thread in deterministic characterization mode;
 - deterministic worker and callback task IDs;
 - explicit branch IDs and parent ambiguity event for every state fork;
 - independent queues and state snapshots after `LOW_FIRST`, `HIGH_FIRST`, and latency-stress forks;
@@ -642,7 +702,19 @@ Scheduler requirements:
 - ability to pause immediately before and after any broker call;
 - exact replay from a failure trace with the same seed.
 
-Run every deterministic fixture repeatedly in CI and require byte-identical canonical traces.
+The scheduler is the only component allowed to advance a cooperative task. Every `TASK_REGISTERED`, `TASK_STARTED`, `TASK_BLOCKED`, `TASK_WOKE`, `TASK_JOINED`, `TASK_CANCELLED`, `TASK_FAILED`, and callback-delivery event includes its task/parent IDs and causal scheduler sequence.
+
+Required concurrency fixtures prove:
+
+- an order callback runs while another task is in simulated retry/poll/cool-off-disabled sleep without a host thread;
+- a nested callback at a declared yield point exercises the current update guard deterministically;
+- simultaneous callback and poll events follow each explicit priority permutation;
+- the post-fill delayed status-refresh `Thread` becomes a scheduled task, sleeps five simulated seconds, and never starts an OS thread;
+- `threading.Timer` registration, cancellation, firing, join timeout, and liveness use simulated time;
+- strict `_thread`/executor guards detect any unadapted spawn;
+- repeated runs produce byte-identical task and strategy traces.
+
+Run every deterministic fixture repeatedly in CI and require byte-identical canonical traces. Golden traces are generated only by this cooperative scheduler lane.
 
 ## 9. Fake broker semantics
 
@@ -759,7 +831,7 @@ The fake must expose call counts and visibility versions in the trace so cache b
 
 ### 10.1 First-class source: `indian-wheel` Upstox/LEAN data
 
-The default historical market-path source is the existing sibling `indian-wheel` repository (`YadavKapil/Backtesting`), exported through the contract in section 7.4. Direct file reads from a sibling checkout are prohibited.
+The default historical market-path source is the existing sibling `indian-wheel` repository (`YadavKapil/Backtesting`), exported through the contract in section 7.5. Direct file reads from a sibling checkout are prohibited.
 
 The source boundary includes:
 
@@ -934,7 +1006,15 @@ Calculate brokerage, STT, exchange charges, SEBI charges, GST, stamp duty, and a
 
 ### 11.1 Authoritative legacy execution
 
-Use one isolated Python worker process per simulated Wave instance for acceptance runs. This matches current process-local globals:
+The authoritative decision/state/interleaving oracle is the deterministic cooperative runner. The initial supported multi-worker mechanism is **fresh worker-scoped module namespaces in one controlled interpreter**, not shared `common_lib` globals:
+
+1. `WorkerModuleLoader` loads a fresh `common_lib` module object and ticker module object under a synthetic worker package name.
+2. During import and task dispatch, a worker-scoped import router resolves legacy absolute imports such as `common_lib` to that worker's module object.
+3. Each function's globals remain bound to its own module dictionary after loading.
+4. Only one cooperative task executes Python code at a time; the scheduler switches workers explicitly.
+5. The loader asserts that mutable module objects, locks, caches, order dictionaries, and callback guards are not identity-shared between workers.
+
+Each `WorkerContext` contains the process-local state production currently obtains through globals:
 
 - `orders` and sibling graph;
 - initial/current position snapshots;
@@ -948,7 +1028,9 @@ Use one isolated Python worker process per simulated Wave instance for acceptanc
 - completed-order IDs;
 - random tags and process status.
 
-An in-process module-reload runner may be used for fast unit characterization, but it cannot be the final oracle for concurrency or multiple instances.
+The coordinator owns `FakeKite`, market data, the account ledger, simulated time, and event ordering. Worker calls enter shared broker truth only through deterministic adapter requests. No worker directly reads another worker's module namespace.
+
+If worker-scoped import routing proves unable to isolate a Wave-reachable extension module, the fallback is one step-locked interpreter subprocess per worker: the coordinator sends exactly one task step and receives its result before advancing another event. That fallback still installs bootstrap and `SimTaskRuntime`, permits no autonomous thread/callback execution, and must produce the same canonical trace. It is not the separate process-validation lane described below.
 
 ### 11.2 Shared versus local state
 
@@ -982,9 +1064,32 @@ Each scenario gets a temporary root with explicit subdirectories for:
 - instrument database;
 - spot-price bridge files.
 
-No replay may read user credentials, current live status, live logs, or unpinned repository-adjacent state. Assert that no network socket or real Kite client is created.
+The sandbox also owns:
 
-### 11.4 Restart and recovery
+- the staged source/import root;
+- fake `HOME`, temp, cache, and application-state directories;
+- explicit fake/canary credentials and environment;
+- instrument, API-monitor, GTT-tag, trade, and executed-order SQLite databases;
+- every SQLite journal, WAL, SHM, lock, and temporary file;
+- a creation ledger of every opened/written path.
+
+All paths must resolve beneath the sandbox root after canonicalization. The bootstrap fails before Wave import if any real `configfile.ini`, API key/token source, user home, repository runtime state, localhost service, or production database is reachable. Canary credential values are deliberately unique, and teardown asserts they occur nowhere in trace JSON, logs, exceptions, snapshots, or test output.
+
+The network guard denies sockets, DNS, HTTP, WebSockets, and broker transports before argument formatting/logging. It traces only sanitized transport type and call site as `UNEXPECTED_NETWORK_ACCESS`. No replay may create a real Kite, ticker, monitored API, notification transport, or memcache client.
+
+### 11.4 Process-boundary validation lane
+
+Run a separate, non-golden subprocess lane to verify:
+
+- the sandbox/bootstrap is established before imports in a fresh interpreter;
+- separate processes do not share `common_lib` globals;
+- SIGTERM, `atexit`, status cleanup, crash, restart, and duplicate-PID flows cross real process boundaries;
+- imports and databases still remain inside the sandbox;
+- fake broker objects and network denial remain installed.
+
+This lane may validate production process/thread construction in explicitly non-deterministic smoke cases, but real-thread order is not compared byte-for-byte and never creates or updates golden traces. Decision/state/interleaving goldens come only from the cooperative oracle. Any behavior observed only in the process lane is reported separately as a boundary discrepancy.
+
+### 11.5 Restart and recovery
 
 Test two meanings of restart:
 
@@ -1037,6 +1142,8 @@ Every row below expands into focused scenarios for CE and PE where direction mat
 | Area | Minimum scenarios |
 |---|---|
 | Startup | valid regular start; asymmetric quantity; invalid symbol/gap/quantity; token failure; instrument missing; unqualified quote failure; duplicate 409; forced duplicate; pre-open; exact open; exact close; post-close; holiday; weekend |
+| Bootstrap preflight | Wave import only after sandbox activation; fake Kite/MonitoredKite/ticker modules constructed; real config/home/repo paths denied; network/DNS/HTTP attempt emits sanitized `UNEXPECTED_NETWORK_ACCESS`; memcache disabled/hit/miss/error fixtures; SQLite/WAL/SHM under sandbox; canary secrets absent from every artifact; unload/reimport starts clean |
+| Cooperative tasks | callback during simulated sleep; nested callback at yield; simultaneous callback/poll priority permutations; delayed five-second status refresh; timer fire/cancel/join timeout/liveness; direct `_thread` denial; no real OS thread; repeated task traces byte-identical |
 | Initial state | flat; long option; short option; non-zero initial position; unrelated portfolio positions; current position changes during init; missing/stale instrument data |
 | Exported actual days | one-minute NIFTY range day; one-sided trend; gap open; expiry/near-expiry high-gamma day; incomplete/illiquid day; exact dataset ID and manifest hash in every result |
 | Initial replay model | `market_resolution=1minute`; `cool_off_mode=disabled`; both legacy quote reads see `C_t`; `COOL_OFF_BYPASSED` trace; `trigger_mode=close_only`; `fill_price_mode=limit`; `equivalence_status=modeled_not_exact` |
@@ -1063,6 +1170,7 @@ Every row below expands into focused scenarios for CE and PE where direction mat
 | Fees/execution | limit-price default; open-price improvement as a separate policy; touched-but-missed fill; seeded fill probability; reject any worse-than-limit execution; no bid/ask; resolved Upstox fee schedule; statutory date boundary; lot-size regime; P&L before/after costs |
 | Restart/recovery | crash at each order/GTT state; stale status; active broker orders; active GTT; fill during downtime; restart duplicate; config changed while down |
 | Multi-instance | shared delta reaction; stale per-process cache; forced same-symbol duplicate; status duplicate badge; attribution ambiguity; cross-instance setting non-enforcement |
+| Worker isolation | two fresh worker module graphs have distinct globals/caches/locks; coordinator-shared FakeKite ledger; deterministic cross-worker event order; unload one worker without mutating another; subprocess boundary lane confirms process/global separation |
 | Faults | network/data exception; timeout; rate limit; malformed response; missing required field; quote outage; positions outage with/without stale cache; disk full/permission error |
 | Dry-run | regular calls blocked; GTT calls blocked; resulting local state and repeated main-loop attempts |
 
@@ -1367,18 +1475,19 @@ Estimates assume one engineer familiar with Python, Kite Connect, and the reposi
 | Phase | Deliverables | Owner | Estimate | Exit gate |
 |---|---|---|---:|---|
 | 0. Freeze and inventory | Wave baseline SHA/reachability/issue catalog plus exact `indian-wheel` config, root, archive, contract, resolution, date-range, missingness, multiplier, fee, and timestamp inventory | Both repos | 3-5 days | Inventory reviewed; unavailable history is explicit; no rewrite started |
-| 1. Legacy characterization shell | Existing-code runner, monkeypatched fake calls, sandboxed files, clock substitution, startup/duo/callback tests, first deterministic goldens | `ui-trading-system` | 5-8 days | Current targeted tests plus first legacy traces; current code remains oracle |
-| 2. Dataset schema and exporter | Freeze `wave-replay-dataset-v1`; implement `indian-wheel` export command, Parquet tables, manifest, resolved fees, hash/partition validator | `indian-wheel` | 7-10 days | One immutable one-minute NIFTY export passes producer validation |
-| 3. Dataset consumer and scheduler | Consumer validator, bar availability conversion, scenario binding, stable scheduler, ID normalization, repeated-run checks | `ui-trading-system` | 7-10 days | Producer and consumer reports match; 100 runs have identical hashes |
-| 4. Initial actual-market Wave days | Run current legacy decision path on exported one-minute NIFTY range, trend, gap-open, and expiry/high-gamma days with `cool_off_mode=disabled`, `trigger_mode=close_only`, and `fill_price_mode=limit` | `ui-trading-system` | 5-8 days | At least one complete E2E replay declares the model, missingness, fill undercount caveat, and `modeled_not_exact` status |
-| 5. OHLC-touch sensitivity | Re-run the same actual days with `ohlc_touch_branched`, LOW_FIRST/HIGH_FIRST, optional cancellation-latency stress, state merging, and branch budgets | `ui-trading-system` | 5-8 days | Close-only versus OHLC comparison and conditional outcome dispersion are reported separately |
-| 6. Fake regular broker and scripted fault matrix | Orders, positions, partial fills, rejects, cancel/modify races, callback permutations, visibility lag, API failures layered over actual or minimal market paths | `ui-trading-system` | 7-10 days | Regular-order transition and reconciliation matrix passes |
-| 7. GTT and lifecycle fidelity | GTT state machine, child tags, reconnect, market close, restart/crash, persistence failures | `ui-trading-system` | 7-10 days | GTT, recovery, and close-boundary goldens approved |
-| 8. Risk and multi-instance fidelity | Step/delta/velocity/cooldown/repricing, synchronized portfolio bars, process isolation, shared portfolio, dashboard status behavior | `ui-trading-system` | 7-10 days | Risk boundaries, missing-quote policies, and multi-worker races covered |
-| 9. Golden corpus and coverage closure | Actual-day result set, sanitized broker captures, scripted scenarios, reachable-branch closure, CI artifact workflow | Both repos | 5-8 days | Legacy-equivalent oracle and modeled actual-data replay corpus approved |
-| 10. Corrected mode | Individual correction flags and reviewed golden deltas | `ui-trading-system` | 5-10 days | Each fix isolated, reversible, and differentially tested |
-| 11. Clean core | Incremental extraction/reimplementation behind ports | `ui-trading-system` | 10-20 days | Full scenario parity or approved flag-specific deltas |
-| 12. LEAN adapter | Reuse exported data/schema, map brokerage/GTT behavior, canonical traces, close-only baseline, and OHLC sensitivity | Both repos | 10-15 days | LEAN comparison report passes decision and data-provenance gates |
+| 1. Hermetic bootstrap and task runtime | Pre-import sandbox, source staging, fake import modules, fail-closed network, deterministic memcache, isolated SQLite/files, `SimTaskRuntime`, fresh worker namespaces, and Gate 0 tests | `ui-trading-system` | 7-10 days | Gate 0 passes; no Wave import precedes bootstrap; no real thread/network/production path; no golden may yet be approved |
+| 2. Legacy characterization shell | Cooperative existing-code runner, FakeKite/FakeTicker, SimClock, startup/duo/callback/task permutations, subprocess boundary lane, first candidate traces | `ui-trading-system` | 6-9 days | Gate 0 remains green; task/interleaving traces are byte-identical; current code remains oracle; first goldens may be reviewed |
+| 3. Dataset schema and exporter | Freeze `wave-replay-dataset-v1`; implement `indian-wheel` export command, Parquet tables, manifest, resolved fees, hash/partition validator | `indian-wheel` | 7-10 days | One immutable one-minute NIFTY export passes producer validation |
+| 4. Dataset consumer and scheduler | Consumer validator, bar availability conversion, scenario binding, stable scheduler, ID normalization, repeated-run checks | `ui-trading-system` | 7-10 days | Producer and consumer reports match; 100 runs have identical hashes |
+| 5. Initial actual-market Wave days | Run current legacy decision path on exported one-minute NIFTY range, trend, gap-open, and expiry/high-gamma days with `cool_off_mode=disabled`, `trigger_mode=close_only`, and `fill_price_mode=limit` | `ui-trading-system` | 5-8 days | At least one complete E2E replay declares the model, missingness, fill undercount caveat, and `modeled_not_exact` status |
+| 6. OHLC-touch sensitivity | Re-run the same actual days with `ohlc_touch_branched`, LOW_FIRST/HIGH_FIRST, optional cancellation-latency stress, state merging, and branch budgets | `ui-trading-system` | 5-8 days | Close-only versus OHLC comparison and conditional outcome dispersion are reported separately |
+| 7. Fake regular broker and scripted fault matrix | Orders, positions, partial fills, rejects, cancel/modify races, callback permutations, visibility lag, API failures layered over actual or minimal market paths | `ui-trading-system` | 7-10 days | Regular-order transition and reconciliation matrix passes |
+| 8. GTT and lifecycle fidelity | GTT state machine, child tags, reconnect, market close, restart/crash, persistence failures | `ui-trading-system` | 7-10 days | GTT, recovery, and close-boundary goldens approved |
+| 9. Risk and multi-instance fidelity | Step/delta/velocity/cooldown/repricing, synchronized portfolio bars, cooperative worker namespaces, shared broker truth, and subprocess boundary checks | `ui-trading-system` | 7-10 days | Risk boundaries, missing-quote policies, worker isolation, and multi-worker races covered |
+| 10. Golden corpus and coverage closure | Actual-day result set, sanitized broker captures, scripted scenarios, reachable-branch closure, CI artifact workflow | Both repos | 5-8 days | Cooperative legacy oracle and modeled actual-data replay corpus approved |
+| 11. Corrected mode | Individual correction flags and reviewed golden deltas | `ui-trading-system` | 5-10 days | Each fix isolated, reversible, and differentially tested |
+| 12. Clean core | Incremental extraction/reimplementation behind ports | `ui-trading-system` | 10-20 days | Full scenario parity or approved flag-specific deltas |
+| 13. LEAN adapter | Reuse exported data/schema, map brokerage/GTT behavior, canonical traces, close-only baseline, and OHLC sensitivity | Both repos | 10-15 days | LEAN comparison report passes decision and data-provenance gates |
 
 Expected effort:
 
@@ -1386,9 +1495,28 @@ Expected effort:
 - Corrected mode plus clean-core migration: an additional 3-6 weeks.
 - LEAN integration: an additional 2-3 weeks after the portable data boundary exists.
 
-Parallelize exporter implementation and scripted broker modeling only after schema v1 and the legacy trace contract are frozen. Do not block initial characterization tests on the exporter, and do not begin the clean rewrite before both golden scenarios and actual-day replay gates pass.
+Parallelize exporter implementation and scripted broker modeling only after schema v1 and the legacy trace contract are frozen. Phase 2 may inspect candidate traces, but **no golden approval begins until Phase 1 Gate 0 and cooperative-task determinism pass**. Do not block initial characterization on the exporter, and do not begin the clean rewrite before both golden scenarios and actual-day replay gates pass.
 
 ## 19. Verification gates
+
+### Gate 0: Pre-import hermetic and cooperative preflight
+
+This gate runs before any golden-producing characterization:
+
+- bootstrap is active before the first Wave-reachable import;
+- source/config/runtime paths resolve only beneath the scenario sandbox;
+- scenario-owned fake credentials and explicit `live_trading` config are used; real config, home, tokens, API keys, databases, status, and logs are unreachable;
+- `kiteconnect`, `MonitoredKite`, ticker, memcache, notification, and transport objects imported or constructed by Wave are approved fakes;
+- socket, DNS, HTTP, WebSocket, and unregistered transport probes fail closed and emit a sanitized `UNEXPECTED_NETWORK_ACCESS` without arguments or secrets;
+- memcache behavior is scenario-pinned and no localhost probe occurs;
+- instrument/API-monitor/trade SQLite files and any WAL/SHM/journal files are created only under the sandbox;
+- `threading.Thread`, `threading.Timer`, ticker callbacks, delayed refresh, and all Wave-reachable task starts resolve to `SimTaskRuntime`; direct `_thread`/executor creation fails;
+- the host real-thread inventory is unchanged across import and execution;
+- a filesystem creation ledger shows no production path touched;
+- canary secrets are absent from traces, logs, snapshots, exceptions, and test output;
+- teardown unloads worker modules and a second import starts with fresh globals.
+
+Any failure blocks Phase 2 characterization and all golden approval.
 
 ### Gate A: No accidental rewrite
 
@@ -1401,6 +1529,7 @@ Parallelize exporter implementation and scripted broker modeling only after sche
 - Network access is blocked.
 - Real credentials and live state are unreachable.
 - No real sleeps or host-time decisions occur.
+- No deterministic callback, timer, ticker handler, or delayed refresh executes on an OS thread.
 - Temporary state is isolated and removed after tests.
 
 ### Gate C: Portable data integrity
@@ -1418,6 +1547,8 @@ Parallelize exporter implementation and scripted broker modeling only after sche
 - Repeated runs have byte-identical canonical traces and final-state hashes.
 - Seed and same-timestamp ordering are visible in reports.
 - A failing run can be reproduced from its bundle alone.
+- callback-during-sleep, nested callback, simultaneous callback/poll, delayed refresh, timer, join, and liveness fixtures are byte-identical;
+- golden traces are generated only by the cooperative runtime; subprocess lane results are separately labeled and non-golden.
 
 ### Gate E: Broker fidelity
 
@@ -1460,8 +1591,12 @@ Parallelize exporter implementation and scripted broker modeling only after sche
 | Risk | Mitigation |
 |---|---|
 | The fake broker encodes assumptions that differ from Zerodha | Prefer recorded events; version semantics; keep response/callback scripts; validate against captured sessions |
-| Monkeypatching misses a wall-clock, random, filesystem, or network path | Block live network, audit call graph, trace unexpected calls, and fail closed |
-| In-process tests hide global-state/process behavior | Use process-isolated acceptance runs and reserve in-process execution for fast unit characterization |
+| Import-time side effects occur before ordinary monkeypatching | Establish `ReplayBootstrap`, fake `sys.modules`, network denial, source/config sandbox, time, and task seams before importing any Wave-reachable module |
+| A Wave callback/thread escapes cooperative scheduling | Patch Thread/Timer/ticker delivery, deny direct `_thread`/executors, compare host thread inventory, and block Gate 0 on any real spawn |
+| Fresh worker namespaces accidentally share `common_lib` globals | Assert object identity isolation, dispatch through a worker-scoped import router, and cross-check with the separate subprocess boundary lane |
+| Cooperative execution hides process-boundary defects | Keep deterministic goldens in the cooperative oracle and separately test fresh-process imports, signals, `atexit`, crash, and restart without treating OS scheduling as golden |
+| Sandbox config or exception output leaks credentials | Use canary-only fake credentials, sanitize network traces before arguments are formatted, and scan every artifact/output at teardown |
+| SQLite side files escape configured database paths | Resolve DB paths before import, ledger every open/write, and require database/WAL/SHM/journal cleanup under the sandbox |
 | Exact callback timing is unavailable historically | Model visibility windows and permutations; label inferred results; do not claim exact equivalence |
 | OHLC creates false certainty | Fork LOW_FIRST and HIGH_FIRST Wave states, optionally stress cancellation latency, and keep deterministic/Brownian paths secondary rather than observed truth |
 | Same-bar branching grows exponentially | Hash and merge equivalent states, enforce a deterministic budget, retain declared adverse/best-known representatives, and label pruned results bounded/approximate |
@@ -1491,33 +1626,40 @@ The primary tradeoff is speed versus confidence. A quick clean rewrite may look 
 The historical replay/simulation effort is complete only when all of the following are true:
 
 1. A reviewed manifest lists every Wave-reachable function, branch, external call, callback, thread target, and persistence side effect from the frozen baseline.
-2. The unmodified legacy decision path runs hermetically against a narrow fake Kite/ticker adapter and simulated clock.
-3. `indian-wheel` has a reviewed exporter for `wave-replay-dataset-v1` that reads actual configured Upstox/LEAN roots, including isolated `lean_data_name` roots, without exposing source-format logic to the consumer.
-4. At least one immutable, gitignored one-minute NIFTY option/underlying export includes Parquet data, JSON manifest, session calendar, contract metadata, fee schedule, source/config/archive hashes, exact date/resolution/count inventory, and validation report.
-5. `ui-trading-system` consumes that export by path/artifact and manifest hash without importing sibling modules or traversing to a sibling checkout.
-6. Timestamp tests prove LEAN end-time and candle start-time sources share a no-lookahead `available_at` convention, and orders created from `C_t` cannot fill on bar `t`.
-7. At least one current Wave legacy-decision-path run completes end to end on exported `indian-wheel` market data with `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`, and reports fills, state, positions, fees, P&L, provenance, missing contracts/bars, and unknown quotes.
-8. The historical corpus includes range, trend, gap-open, and expiry/high-gamma days where verified synchronized one-minute coverage permits; no coarser data is accepted for any historical Wave test.
-9. Portfolio-delta decisions identify synchronized source bars for every held option and spot; missing option bars are never forward-filled.
-10. NIFTY zero volume remains source-zero, and no synthetic volume or undeclared NIFTYBEES proxy enters legacy behavior.
-11. The harness replays deterministic option/spot availability events, callbacks, REST snapshots, errors, process events, and file events without live network or wall-clock sleeping.
-12. Regular orders, GTTs, child orders, partial fills, rejects, timeouts, retries, cancellation/modify races, and callback/polling reconciliation are modeled through a broker/fault stream separate from historical bars.
-13. Initial close-only timing is explicit: both legacy quote reads see synchronized completed `C_t`, cool-off is bypassed and traced, new orders become eligible only from `C_(t+1)`, and high/low never drives this mode; exact production cool-off equivalence is reserved for tick/second captures.
-14. `close_only` fills BUY only on a later close at/below its limit and SELL only on a later close at/above its limit, rejects overlapping/inverted brackets by default, fills at the limit, and reports optional close-price sensitivity separately.
-15. A later `ohlc_touch_branched` run forks independent `LOW_FIRST` and `HIGH_FIRST` Wave/broker states, with optional `CANCELLATION_LATENCY_STRESS`; deterministic O-L-H-C/O-H-L-C and seeded Brownian-bridge runs remain secondary sensitivity analyses.
-16. Branch state hashing/merging, budget, deterministic pruning, and approximate/bounded labeling are implemented, and all-low-first/all-high-first paths are not called exact global bounds without proof.
-17. No limit executes worse than its limit, and execution uncertainty is represented by missed/probabilistic fills or scripted broker behavior.
-18. Market hours, holidays, expiry/DTE, contract roll/lifecycle, tick-size behavior, disabled initial cool-off, 180-second polling, delayed refresh, and market-close shutdown are deterministic.
-19. Step multipliers, percentage gaps, portfolio-delta multipliers, per-expiry hard restrictions, velocity, cooldown, repricing, low-premium exception, and asymmetric quantities have boundary scenarios.
-20. Process-local globals are isolated per worker while broker account state is shared for multi-instance scenarios.
-21. Crash, restart, stale status, orphan regular order, orphan GTT, missed callback, and duplicate-instance scenarios have approved outcomes.
-22. Status files, executed-order persistence, dashboard overlay/injection, notification side effects, exported fee inputs, execution assumptions, positions, and P&L are represented in canonical traces or explicitly scoped as analytics.
-23. Every deterministic scenario produces a byte-identical canonical trace across repeated runs.
-24. All Wave-reachable branches are covered or have a reviewed, specific waiver, and known implementation issues are characterized as legacy behavior before any correction is enabled.
-25. An approved legacy golden corpus includes modeled actual market-path days, scripted failure/reconnect, and multi-instance behavior, using sanitized real broker captures where available.
-26. Actual-data results present the close-only baseline separately from OHLC-touch sensitivity and ambiguous branched outcomes, including ambiguity counts, branch count, merge/prune statistics, outcome ranges, and P&L/exposure dispersion; no single headline P&L appears without cool-off, trigger, fill-price, and ambiguity policies.
-27. Differential tests detect seeded strategy, data-availability, and orchestration divergences and report the first causal mismatch.
-28. `legacy_equivalent`, individually flagged `corrected`, and `lean_comparison` outputs are separate and clearly labeled; no correction becomes default without reviewed trace deltas.
-29. No clean core or LEAN implementation is considered equivalent based only on aggregate fills or P&L.
+2. Gate 0 proves the temporary source/config/runtime sandbox, environment, fake import modules, network denial, deterministic task/time seams, and SQLite paths are established before any Wave-reachable import.
+3. Scenario-owned `configfile.ini` uses fake canary credentials and explicit live-trading mode; real credentials, home, repository runtime state, databases, status, and logs are unreachable.
+4. All socket/DNS/HTTP/WebSocket/broker transports fail closed; `UNEXPECTED_NETWORK_ACCESS` is sanitized; memcache is scenario-pinned; all files including SQLite WAL/SHM/journals remain beneath the sandbox; no canary secret appears in any artifact.
+5. `SimTaskRuntime` intercepts Thread, Timer, ticker callbacks, delayed refresh, joins, liveness, and direct/unregistered task starts before import; no deterministic Wave task executes on an OS thread.
+6. Callback-during-sleep, nested callback, simultaneous callback/poll, delayed refresh, timer fire/cancel, join timeout, and liveness scenarios have byte-identical task/strategy traces.
+7. Every simulated worker has a fresh module graph and distinct process-local globals/caches/locks; coordinator-owned `FakeKite` is the only shared broker truth.
+8. Golden decision/state/interleaving traces come only from the cooperative oracle. A separate non-golden subprocess lane validates fresh imports, process/global boundaries, signals, `atexit`, crash, shutdown, and restart.
+9. Teardown unloads/reimports workers cleanly, restores host state, removes the sandbox, and leaves no production or temporary runtime artifact behind.
+10. The unmodified legacy decision path runs hermetically against narrow fake Kite/ticker adapters, simulated clock, and cooperative tasks.
+11. `indian-wheel` has a reviewed exporter for `wave-replay-dataset-v1` that reads actual configured Upstox/LEAN roots, including isolated `lean_data_name` roots, without exposing source-format logic to the consumer.
+12. At least one immutable, gitignored one-minute NIFTY option/underlying export includes Parquet data, JSON manifest, session calendar, contract metadata, fee schedule, source/config/archive hashes, exact date/resolution/count inventory, and validation report.
+13. `ui-trading-system` consumes that export by path/artifact and manifest hash without importing sibling modules or traversing to a sibling checkout.
+14. Timestamp tests prove LEAN end-time and candle start-time sources share a no-lookahead `available_at` convention, and orders created from `C_t` cannot fill on bar `t`.
+15. At least one current Wave legacy-decision-path run completes end to end on exported `indian-wheel` market data with `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`, and reports fills, state, positions, fees, P&L, provenance, missing contracts/bars, and unknown quotes.
+16. The historical corpus includes range, trend, gap-open, and expiry/high-gamma days where verified synchronized one-minute coverage permits; no coarser data is accepted for any historical Wave test.
+17. Portfolio-delta decisions identify synchronized source bars for every held option and spot; missing option bars are never forward-filled.
+18. NIFTY zero volume remains source-zero, and no synthetic volume or undeclared NIFTYBEES proxy enters legacy behavior.
+19. The harness replays deterministic option/spot availability events, callbacks, REST snapshots, errors, process events, and file events without live network, wall-clock sleeping, or uncontrolled concurrency.
+20. Regular orders, GTTs, child orders, partial fills, rejects, timeouts, retries, cancellation/modify races, and callback/polling reconciliation are modeled through a broker/fault stream separate from historical bars.
+21. Initial close-only timing is explicit: both legacy quote reads see synchronized completed `C_t`, cool-off is bypassed and traced, new orders become eligible only from `C_(t+1)`, and high/low never drives this mode; exact production cool-off equivalence is reserved for tick/second captures.
+22. `close_only` fills BUY only on a later close at/below its limit and SELL only on a later close at/above its limit, rejects overlapping/inverted brackets by default, fills at the limit, and reports optional close-price sensitivity separately.
+23. A later `ohlc_touch_branched` run forks independent `LOW_FIRST` and `HIGH_FIRST` Wave/broker states, with optional `CANCELLATION_LATENCY_STRESS`; deterministic O-L-H-C/O-H-L-C and seeded Brownian-bridge runs remain secondary sensitivity analyses.
+24. Branch state hashing/merging, budget, deterministic pruning, and approximate/bounded labeling are implemented, and all-low-first/all-high-first paths are not called exact global bounds without proof.
+25. No limit executes worse than its limit, and execution uncertainty is represented by missed/probabilistic fills or scripted broker behavior.
+26. Market hours, holidays, expiry/DTE, contract roll/lifecycle, tick-size behavior, disabled initial cool-off, 180-second polling, delayed refresh, and market-close shutdown are deterministic.
+27. Step multipliers, percentage gaps, portfolio-delta multipliers, per-expiry hard restrictions, velocity, cooldown, repricing, low-premium exception, and asymmetric quantities have boundary scenarios.
+28. Crash, restart, stale status, orphan regular order, orphan GTT, missed callback, and duplicate-instance scenarios have approved outcomes.
+29. Status files, executed-order persistence, dashboard overlay/injection, notification side effects, exported fee inputs, execution assumptions, positions, and P&L are represented in canonical traces or explicitly scoped as analytics.
+30. Every deterministic scenario produces a byte-identical canonical trace across repeated runs.
+31. All Wave-reachable branches are covered or have a reviewed, specific waiver, and known implementation issues are characterized as legacy behavior before any correction is enabled.
+32. An approved legacy golden corpus includes modeled actual market-path days, scripted failure/reconnect, and multi-instance behavior, using sanitized real broker captures where available.
+33. Actual-data results present the close-only baseline separately from OHLC-touch sensitivity and ambiguous branched outcomes, including ambiguity counts, branch count, merge/prune statistics, outcome ranges, and P&L/exposure dispersion; no single headline P&L appears without cool-off, trigger, fill-price, and ambiguity policies.
+34. Differential tests detect seeded strategy, data-availability, and orchestration divergences and report the first causal mismatch.
+35. `legacy_equivalent`, individually flagged `corrected`, and `lean_comparison` outputs are separate and clearly labeled; no correction becomes default without reviewed trace deltas.
+36. No clean core or LEAN implementation is considered equivalent based only on aggregate fills or P&L.
 
 The first implementation milestone is therefore a characterization test around the existing code, not a rewrite. The first cross-repository milestone is a portable, validated actual-data export, not a runtime link between checkouts. The first durable result is the combined legacy golden characterization corpus and quantified actual-market replay corpus; the clean core and LEAN adapter follow from them.
