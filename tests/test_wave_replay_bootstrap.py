@@ -63,7 +63,7 @@ def test_gate_zero_imports_staged_wave_with_fakes_and_no_real_threads():
         assert module.kite is kite
         assert module.kws._ticker is ticker
         assert module.kws.listener_id == "gate-zero"
-        assert module._memcache_client is None
+        assert module._memcache_client.mode == "disabled"
         assert not (bootstrap.paths.root / "instruments.db").exists()
         assert all(str(path).startswith(str(bootstrap.paths.root)) for path in bootstrap.paths.root.rglob("*"))
     assert {thread.ident for thread in threading.enumerate()} == before
@@ -327,6 +327,23 @@ def test_preopened_host_file_handler_is_detached_for_full_replay_context(tmp_pat
     finally:
         root.removeHandler(handler)
         handler.close()
+
+
+@pytest.mark.parametrize("mode", ["disabled", "miss", "hit", "error"])
+def test_memcache_mode_is_preserved_in_imported_legacy_module(mode):
+    trace, scheduler, tasks, clock, kite, ticker = _components()
+    with ReplayBootstrap(
+        repository_root=".",
+        scheduler=scheduler,
+        tasks=tasks,
+        clock=clock,
+        fake_kite=kite,
+        fake_ticker=ticker,
+        trace=trace,
+        memcache_mode=mode,
+    ) as bootstrap:
+        module = bootstrap.load_worker(f"memcache-{mode}", [])
+        assert module._memcache_client.mode == mode
 
 
 def test_filesystem_guard_resolves_symlink_or_junction_escape(tmp_path):

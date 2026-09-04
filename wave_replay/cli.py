@@ -15,7 +15,7 @@ from .bootstrap import ReplayBootstrap
 from .broker_engine import BrokerEngine
 from .clock import SimClock
 from .compare import approve_golden, compare_jsonl
-from .coverage_manifest import function_inventory
+from .coverage_manifest import assert_wave_coverage_complete, build_wave_coverage
 from .datasets import ReplayDataset
 from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
@@ -65,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     coverage = subparsers.add_parser("coverage-manifest")
     coverage.add_argument("--source", default="common_lib.py")
     coverage.add_argument("--output", required=True)
+    coverage.add_argument("--repository-root", default=".")
+    coverage.add_argument(
+        "--digests",
+        default="tests/fixtures/wave_replay/goldens/characterization_digests.json",
+    )
+
+    require_actual = subparsers.add_parser("require-actual")
+    require_actual.add_argument(
+        "--expectations",
+        default="tests/fixtures/wave_replay/actual_release_expectations.json",
+    )
+    require_actual.add_argument("--data-root", default="data/wave-replay")
 
     boundary = subparsers.add_parser("boundary-probe", help=argparse.SUPPRESS)
     boundary.add_argument("--repository-root", default=".")
@@ -111,10 +123,38 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"golden": str(Path(args.golden).resolve())}, sort_keys=True))
         return 0
     if args.command == "coverage-manifest":
+        manifest = build_wave_coverage(args.repository_root, args.digests)
+        assert_wave_coverage_complete(manifest)
         Path(args.output).write_text(
-            json.dumps(function_inventory(args.source), indent=2, sort_keys=True),
+            json.dumps(manifest, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        return 0
+    if args.command == "require-actual":
+        document = json.loads(Path(args.expectations).read_text(encoding="utf-8"))
+        missing = []
+        invalid = []
+        checked_paths = set()
+        for value in document["cases"].values():
+            path = Path(args.data_root) / value["dataset_dir"]
+            if path in checked_paths:
+                continue
+            checked_paths.add(path)
+            if not path.exists():
+                missing.append(str(path))
+                continue
+            try:
+                dataset = ReplayDataset.load(path)
+            except Exception as exc:
+                invalid.append(f"{path}: {exc}")
+                continue
+            if dataset.manifest.dataset_id != value["dataset_id"]:
+                invalid.append(f"{path}: dataset_id mismatch")
+            if dataset.manifest.manifest_sha256 != value["manifest_sha256"]:
+                invalid.append(f"{path}: manifest_sha256 mismatch")
+        if missing or invalid:
+            raise RuntimeError(f"Required actual artifacts unavailable: missing={missing}, invalid={invalid}")
+        print(json.dumps({"required_actual": "ready", "datasets": len(checked_paths)}))
         return 0
     if args.command == "boundary-probe":
         print(json.dumps(_boundary_probe(Path(args.repository_root).resolve()), sort_keys=True))

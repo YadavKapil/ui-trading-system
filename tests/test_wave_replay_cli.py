@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from wave_replay.cli import main
 from wave_replay.compare import approve_golden, compare_jsonl
 from wave_replay.scenario_matrix import CHARACTERIZATION_MATRIX
@@ -61,6 +63,53 @@ def test_characterization_matrix_covers_required_categories():
         "market_hours",
         "multi_instance",
     } <= categories
+
+
+def test_required_actual_gate_fails_closed_when_pinned_dataset_is_absent(tmp_path):
+    expectations = tmp_path / "expectations.json"
+    expectations.write_text(
+        json.dumps(
+            {
+                "cases": {
+                    "range": {
+                        "dataset_dir": "missing-v11",
+                        "dataset_id": "wave-v1-missing",
+                        "manifest_sha256": "missing",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="Required actual artifacts unavailable"):
+        main(
+            [
+                "require-actual",
+                "--expectations",
+                str(expectations),
+                "--data-root",
+                str(tmp_path),
+            ]
+        )
+
+
+def test_coverage_cli_emits_rooted_wave_manifest(tmp_path):
+    output = tmp_path / "coverage.json"
+    assert (
+        main(
+            [
+                "coverage-manifest",
+                "--output",
+                str(output),
+                "--repository-root",
+                ".",
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert manifest["scope"] == "wave-reachable-stage-1-10"
+    assert not any(manifest["uncovered_required"].values())
 
 
 def test_cli_replay_matches_approved_startup_golden_in_fresh_process(tmp_path):

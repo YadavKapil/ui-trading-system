@@ -159,20 +159,30 @@ def select_contract_for_day(
     return selected, first, selected_bar
 
 
-def score_representative_days(dataset: ReplayDataset) -> dict[dt.date, dict[str, Decimal]]:
-    grouped: dict[dt.date, list[Any]] = defaultdict(list)
+def score_representative_days(dataset: ReplayDataset) -> dict[dt.date, dict[str, Decimal | None]]:
+    complete_sessions = _complete_session_dates(dataset)
+    all_grouped: dict[dt.date, list[Any]] = defaultdict(list)
     for bar in dataset.underlying_bars:
         if bar.underlying == "NIFTY" and not bar.missing_bar:
-            grouped[bar.bar_end.date()].append(bar)
-    scores: dict[dt.date, dict[str, Decimal]] = {}
-    sorted_dates = sorted(grouped)
-    prior_close: Decimal | None = None
-    for trading_date in sorted_dates:
-        bars = sorted(grouped[trading_date], key=lambda bar: bar.bar_end)
+            all_grouped[bar.bar_end.date()].append(bar)
+    session_dates = sorted(
+        row["session_date"]
+        if isinstance(row["session_date"], dt.date)
+        else dt.date.fromisoformat(str(row["session_date"]))
+        for row in dataset.sessions
+    )
+    predecessor = {
+        day: session_dates[index - 1] if index else None
+        for index, day in enumerate(session_dates)
+    }
+    scores: dict[dt.date, dict[str, Decimal | None]] = {}
+    for trading_date in sorted(complete_sessions):
+        bars = sorted(all_grouped.get(trading_date, []), key=lambda bar: bar.bar_end)
+        if not bars:
+            continue
         try:
             contract, _, _ = select_contract_for_day(dataset, trading_date)
         except SchemaError:
-            prior_close = bars[-1].close
             continue
         first, last = bars[0].close, bars[-1].close
         high = max(bar.high for bar in bars)
@@ -180,7 +190,13 @@ def score_representative_days(dataset: ReplayDataset) -> dict[dt.date, dict[str,
         intraday_range = max(Decimal("0.01"), high - low)
         absolute_return = abs(last - first)
         efficiency = absolute_return / intraday_range
-        gap = abs(first - prior_close) if prior_close is not None else Decimal("0")
+        prior_date = predecessor.get(trading_date)
+        prior_bars = (
+            sorted(all_grouped.get(prior_date, []), key=lambda bar: bar.bar_end)
+            if prior_date in complete_sessions
+            else []
+        )
+        gap = abs(first - prior_bars[-1].close) if prior_bars else None
         dte = Decimal((contract.expiry - trading_date).days)
         scores[trading_date] = {
             "range": Decimal("1") - min(Decimal("1"), efficiency),
@@ -188,33 +204,50 @@ def score_representative_days(dataset: ReplayDataset) -> dict[dt.date, dict[str,
             "gap_open": gap,
             "expiry_high_gamma": Decimal("21") - dte,
         }
-        prior_close = last
     return scores
 
 
 def select_representative_days(dataset: ReplayDataset) -> dict[str, dt.date]:
-    dates = {bar.session_date for bar in dataset.underlying_bars if bar.underlying == "NIFTY"}
+    complete_sessions = _complete_session_dates(dataset)
+    dates = {
+        bar.session_date
+        for bar in dataset.underlying_bars
+        if bar.underlying == "NIFTY" and bar.session_date in complete_sessions
+    }
     available = {
         role: values["date"]
         for role, values in APPROVED_CORPUS.items()
         if values["date"] in dates
     }
     baseline_roles = {"range", "trend", "gap_open", "expiry_high_gamma"}
-    if len(available) == 1:
+    if len(dates) == 1 and len(available) == 1:
         pass
     elif baseline_roles <= set(available):
         available = {role: available[role] for role in APPROVED_CORPUS if role in baseline_roles}
     else:
-        raise SchemaError("Dataset must contain one approved day or all four baseline days")
+        scores = score_representative_days(dataset)
+        if len(scores) < 4:
+            raise SchemaError("At least four distinct eligible NIFTY dates are required")
+        roles = ("range", "trend", "gap_open", "expiry_high_gamma")
+        ranked = {
+            role: sorted(
+                (day for day in scores if scores[day][role] is not None),
+                key=lambda day: (-scores[day][role], day),
+            )
+            for role in roles
+        }
+        available = _first_distinct_assignment(roles, ranked)
+        if available is None:
+            raise SchemaError("Cannot select four distinct representative days")
     selected: dict[str, dt.date] = {}
     for role, day in available.items():
-        frozen = APPROVED_CORPUS[role]
+        frozen = APPROVED_CORPUS.get(role)
         contract, _, _ = select_contract_for_day(
             dataset,
             day,
             allow_missing_at_open=role == "missing_data",
         )
-        mismatches = [
+        mismatches = [] if frozen is None or frozen["date"] != day else [
             name
             for name, actual in (
                 ("strike", contract.strike),
@@ -227,6 +260,41 @@ def select_representative_days(dataset: ReplayDataset) -> dict[str, dt.date]:
             raise SchemaError(f"Approved {role} contract mismatch: {', '.join(mismatches)}")
         selected[role] = day
     return selected
+
+
+def _complete_session_dates(dataset: ReplayDataset) -> set[dt.date]:
+    return {
+        row["session_date"]
+        if isinstance(row["session_date"], dt.date)
+        else dt.date.fromisoformat(str(row["session_date"]))
+        for row in dataset.sessions
+        if int(row["observed_bar_count"]) == int(row["expected_bar_count"])
+        and int(row["missing_underlying_bar_count"]) == 0
+    }
+
+
+def _first_distinct_assignment(
+    roles: tuple[str, ...],
+    ranked: dict[str, list[dt.date]],
+    *,
+    index: int = 0,
+    used: frozenset[dt.date] = frozenset(),
+) -> dict[str, dt.date] | None:
+    if index == len(roles):
+        return {}
+    role = roles[index]
+    for day in ranked[role]:
+        if day in used:
+            continue
+        remainder = _first_distinct_assignment(
+            roles,
+            ranked,
+            index=index + 1,
+            used=used | {day},
+        )
+        if remainder is not None:
+            return {role: day, **remainder}
+    return None
 
 
 def build_scenarios(

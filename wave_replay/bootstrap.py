@@ -234,7 +234,6 @@ class ReplayBootstrap:
         datetime_shim.date = SimDate
         datetime_shim.datetime = SimDateTime
         module.datetime = datetime_shim
-        module._memcache_client = None
         return module
 
     def __exit__(self, exc_type, exc, traceback) -> None:

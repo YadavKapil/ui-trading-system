@@ -11,7 +11,13 @@ from wave_replay.normalize import sha256_file
 from wave_replay.schemas import SchemaError, derive_replay_instrument_token
 from wave_replay.schemas import BAR_ARROW_SCHEMA, CONTRACT_ARROW_SCHEMA, SESSION_ARROW_SCHEMA
 from wave_replay.selector import build_scenarios, load_saved_wave_settings, select_contract_for_day
-from wave_replay.selector import DEFAULT_WAVE_SETTINGS, select_representative_days
+from wave_replay.selector import (
+    APPROVED_CORPUS,
+    DEFAULT_WAVE_SETTINGS,
+    _first_distinct_assignment,
+    score_representative_days,
+    select_representative_days,
+)
 from wave_replay.synthetic import create_synthetic_dataset
 from wave_replay.seams import instrument_row
 
@@ -190,6 +196,140 @@ def test_legacy_instrument_uses_production_business_day_dte(replay_dataset):
     contract = replay_dataset.contract_for_instrument(scenario.instrument_id)
     assert scenario.calendar_dte == 5
     assert instrument_row(contract, scenario)["days_to_expiry"] == 4
+
+
+def test_general_selector_scores_alternate_dates_instead_of_requiring_approved_corpus(replay_dataset):
+    offset = dt.timedelta(days=730)
+    replay_dataset.underlying_bars = [
+        dataclasses.replace(
+            bar,
+            session_date=bar.session_date + offset,
+            bar_start=bar.bar_start + offset,
+            bar_end=bar.bar_end + offset,
+            available_at=bar.available_at + offset,
+        )
+        for bar in replay_dataset.underlying_bars
+    ]
+    replay_dataset.option_bars = [
+        dataclasses.replace(
+            bar,
+            session_date=bar.session_date + offset,
+            bar_start=bar.bar_start + offset,
+            bar_end=bar.bar_end + offset,
+            available_at=bar.available_at + offset,
+        )
+        for bar in replay_dataset.option_bars
+    ]
+    replay_dataset.contracts = [
+        dataclasses.replace(
+            contract,
+            expiry=contract.expiry + offset,
+            first_session_date=contract.first_session_date + offset,
+            last_session_date=contract.last_session_date + offset,
+            first_bar=contract.first_bar + offset,
+            last_bar=contract.last_bar + offset,
+        )
+        for contract in replay_dataset.contracts
+    ]
+    for session in replay_dataset.sessions:
+        session["session_date"] += offset
+        for field in ("session_open_utc", "session_close_utc", "session_open_ist", "session_close_ist"):
+            session[field] += offset
+    selected = select_representative_days(replay_dataset)
+    assert set(selected) == {"range", "trend", "gap_open", "expiry_high_gamma"}
+    assert not set(selected.values()) & {value["date"] for value in APPROVED_CORPUS.values()}
+
+
+def test_general_selector_does_not_collapse_mixed_corpus_to_single_approved_date(replay_dataset):
+    keep = APPROVED_CORPUS["trend"]["date"]
+    offset = dt.timedelta(days=730)
+    moved = {
+        bar.session_date: bar.session_date if bar.session_date == keep else bar.session_date + offset
+        for bar in replay_dataset.underlying_bars
+    }
+    replay_dataset.underlying_bars = [
+        dataclasses.replace(
+            bar,
+            session_date=moved[bar.session_date],
+            bar_start=bar.bar_start if bar.session_date == keep else bar.bar_start + offset,
+            bar_end=bar.bar_end if bar.session_date == keep else bar.bar_end + offset,
+            available_at=bar.available_at if bar.session_date == keep else bar.available_at + offset,
+        )
+        for bar in replay_dataset.underlying_bars
+    ]
+    replay_dataset.option_bars = [
+        dataclasses.replace(
+            bar,
+            session_date=moved[bar.session_date],
+            bar_start=bar.bar_start if bar.session_date == keep else bar.bar_start + offset,
+            bar_end=bar.bar_end if bar.session_date == keep else bar.bar_end + offset,
+            available_at=bar.available_at if bar.session_date == keep else bar.available_at + offset,
+        )
+        for bar in replay_dataset.option_bars
+    ]
+    replay_dataset.contracts = [
+        dataclasses.replace(
+            contract,
+            expiry=contract.expiry if contract.first_session_date == keep else contract.expiry + offset,
+            first_session_date=moved[contract.first_session_date],
+            last_session_date=moved[contract.last_session_date],
+            first_bar=contract.first_bar if contract.first_session_date == keep else contract.first_bar + offset,
+            last_bar=contract.last_bar if contract.last_session_date == keep else contract.last_bar + offset,
+        )
+        for contract in replay_dataset.contracts
+    ]
+    for session in replay_dataset.sessions:
+        original = session["session_date"]
+        session["session_date"] = moved[original]
+        if original != keep:
+            for field in ("session_open_utc", "session_close_utc", "session_open_ist", "session_close_ist"):
+                session[field] += offset
+
+    selected = select_representative_days(replay_dataset)
+    assert len(selected) == 4
+    assert len(set(selected.values())) == 4
+
+
+def test_general_selector_excludes_partial_underlying_sessions(replay_dataset):
+    partial = APPROVED_CORPUS["range"]["date"]
+    session = next(row for row in replay_dataset.sessions if row["session_date"] == partial)
+    session["observed_bar_count"] -= 1
+    session["missing_underlying_bar_count"] = 1
+
+    with pytest.raises(SchemaError, match="four distinct eligible"):
+        select_representative_days(replay_dataset)
+
+
+def test_gap_score_requires_reliable_immediately_preceding_session(replay_dataset):
+    dates = sorted(row["session_date"] for row in replay_dataset.sessions)
+    prior, candidate = dates[1], dates[2]
+    session = next(row for row in replay_dataset.sessions if row["session_date"] == prior)
+    session["observed_bar_count"] -= 1
+    session["missing_underlying_bar_count"] = 1
+
+    assert score_representative_days(replay_dataset)[candidate]["gap_open"] is None
+
+
+def test_gap_score_is_independent_of_underlying_row_order(replay_dataset):
+    before = score_representative_days(replay_dataset)
+    replay_dataset.underlying_bars.reverse()
+    after = score_representative_days(replay_dataset)
+    assert after == before
+
+
+def test_representative_assignment_backtracks_when_best_range_is_only_gap_candidate():
+    roles = ("range", "trend", "gap_open", "expiry_high_gamma")
+    days = [dt.date(2027, 1, day) for day in range(4, 8)]
+    ranked = {
+        "range": days,
+        "trend": days,
+        "gap_open": [days[0]],
+        "expiry_high_gamma": days,
+    }
+    selected = _first_distinct_assignment(roles, ranked)
+    assert selected is not None
+    assert selected["gap_open"] == days[0]
+    assert len(set(selected.values())) == 4
 
 
 def test_bar_duration_is_validated_even_when_manifest_hash_is_updated(tmp_path):

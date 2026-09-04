@@ -1781,3 +1781,15 @@ The historical replay/simulation effort is complete only when all of the followi
 44. No clean core or LEAN implementation is considered equivalent based only on aggregate fills or P&L.
 
 The first implementation milestone is therefore a characterization test around the existing code, not a rewrite. The first cross-repository milestone is a portable, validated actual-data export, not a runtime link between checkouts. The first durable result is the combined legacy golden characterization corpus and quantified actual-market replay corpus; the clean core and LEAN adapter follow from them.
+
+## Release-artifact gate
+
+Normal CI may skip licensed/generated full-market artifacts. Release acceptance is fail-closed: provision the five authoritative v1.1 directories under `data\wave-replay\` using the exact directory names pinned in `tests\fixtures\wave_replay\actual_release_expectations.json`, then run:
+
+```powershell
+python -m wave_replay.cli require-actual
+$env:WAVE_REPLAY_REQUIRE_ACTUAL = "1"
+python -m pytest -q tests\test_wave_replay_actual_release.py
+```
+
+The command rejects missing directories, invalid manifests, and dataset ID or manifest-hash mismatches. The environment variable converts optional integration skips into failures. No market-data artifact is committed.

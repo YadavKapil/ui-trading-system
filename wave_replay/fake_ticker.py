@@ -35,7 +35,11 @@ class FakeTicker:
         self.tasks = tasks
         self.trace = trace
         self._listeners: dict[str, TickerListener] = {}
+        self._reactor = None
         self.register_listener("default")
+
+    def bind_reactor(self, reactor: Any) -> None:
+        self._reactor = reactor
 
     def register_listener(
         self,
@@ -101,6 +105,8 @@ class FakeTicker:
 
     def connect(self, threaded: bool = True, *, listener_id: str = "default") -> None:
         listener = self._listeners[listener_id]
+        if self._reactor is not None and not self._reactor.running:
+            self._reactor.startRunning()
         listener.generation += 1
         listener.connected = True
         self.deliver("connect", {}, delay=0, listener_id=listener_id)
@@ -232,7 +238,7 @@ class WorkerTickerFacade:
         self._ticker = ticker
         self.listener_id = listener_id
         self.socket_url = "wss://fake.invalid"
-        self._user_agent = "wave-replay"
+        self._user_agent = lambda: "wave-replay"
         self.factory = object()
         self.connect_timeout = 0
 
@@ -258,6 +264,9 @@ class WorkerTickerFacade:
 
     def disconnect(self) -> None:
         self._ticker.disconnect(listener_id=self.listener_id)
+
+    def close(self) -> None:
+        self.disconnect()
 
     def remove(self) -> None:
         self._ticker.remove_listener(self.listener_id)

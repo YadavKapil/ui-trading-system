@@ -113,14 +113,21 @@ class FakeModuleInstaller:
         notifications.service = notifications_service
 
         class Reactor:
-            running = False
+            def __init__(self):
+                self.running = False
 
-            @staticmethod
-            def callFromThread(callback, *args, **kwargs):
+            def callFromThread(self, callback, *args, **kwargs):
                 return callback(*args, **kwargs)
+
+            def startRunning(self):
+                self.running = True
+
+            def stop(self):
+                self.running = False
 
         twisted_internet = types.ModuleType("twisted.internet")
         twisted_internet.reactor = Reactor()
+        self.fake_ticker.bind_reactor(twisted_internet.reactor)
         twisted_internet.ssl = types.SimpleNamespace(ClientContextFactory=lambda: object())
         twisted = types.ModuleType("twisted")
         twisted.internet = twisted_internet

@@ -31,6 +31,11 @@ CHARACTERIZATION_MATRIX = (
     CharacterizationCase("restart-with-open-orders", "restart", "Fresh worker sees broker orders from a crashed worker"),
     CharacterizationCase("market-close-exit", "market_hours", "No replacement/GTT is placed after close"),
     CharacterizationCase("two-workers-shared-broker", "multi_instance", "Distinct worker globals share account broker truth"),
+    CharacterizationCase("reconnect-generation", "connection", "Staged legacy reconnect callbacks advance ticker generation"),
+    CharacterizationCase("cache-hit", "cache", "Legacy worker observes a configured memcache hit"),
+    CharacterizationCase("cache-miss", "cache", "Legacy worker observes a configured memcache miss"),
+    CharacterizationCase("cache-error", "cache", "Legacy worker observes a configured memcache error"),
+    CharacterizationCase("cache-disabled", "cache", "Legacy worker bypasses configured memcache storage"),
 )
 
 DECLARED_TO_EXECUTABLE = {
@@ -52,6 +57,11 @@ DECLARED_TO_EXECUTABLE = {
     "restart-with-open-orders": "restart_recovery",
     "market-close-exit": "market_close",
     "two-workers-shared-broker": "two_workers_shared_broker",
+    "reconnect-generation": "reconnect_lifecycle",
+    "cache-hit": "memcache_hit",
+    "cache-miss": "memcache_miss",
+    "cache-error": "memcache_error",
+    "cache-disabled": "memcache_disabled",
 }
 
 

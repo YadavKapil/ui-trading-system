@@ -227,6 +227,76 @@
     },
     "trace_digest": "sha256:5190b0db56e6cf83961c738510ee43b71000eb175e81229c3b7cc33559efd25c"
   },
+  "reconnect_lifecycle": {
+    "case_id": "reconnect_lifecycle",
+    "summary": {
+      "callbacks": [
+        "connect",
+        "connect"
+      ],
+      "connected": true,
+      "generation": 3,
+      "noreconnect_recorded": true,
+      "subscriptions_restored": [
+        101,
+        202
+      ],
+      "user_agent_callable": true
+    },
+    "trace_digest": "sha256:936bb0b753d15d2e55ea42bcab5aa51c5453bf91e16026572b1705e91eec9e81"
+  },
+  "memcache_hit": {
+    "case_id": "memcache_hit",
+    "summary": {
+      "last_price": 24999.5,
+      "mode": "hit",
+      "stats": {
+        "l1_hits": 0,
+        "l2_hits": 1,
+        "l3_fetches": 0
+      }
+    },
+    "trace_digest": "sha256:76b7c3742454991cddccd22dc717bde22f16e28c6759e396aefbf20ff3b05534"
+  },
+  "memcache_miss": {
+    "case_id": "memcache_miss",
+    "summary": {
+      "last_price": 25000.0,
+      "mode": "miss",
+      "stats": {
+        "l1_hits": 0,
+        "l2_hits": 0,
+        "l3_fetches": 1
+      }
+    },
+    "trace_digest": "sha256:e6ad55a247f12516352a835860acd6513ae5876f5d714f3f20db137b52eb14df"
+  },
+  "memcache_error": {
+    "case_id": "memcache_error",
+    "summary": {
+      "last_price": 25000.0,
+      "mode": "error",
+      "stats": {
+        "l1_hits": 0,
+        "l2_hits": 0,
+        "l3_fetches": 1
+      }
+    },
+    "trace_digest": "sha256:454d41a8fac13c6d7891fea0eeaabd37f853787548870188bcf3803f105125b6"
+  },
+  "memcache_disabled": {
+    "case_id": "memcache_disabled",
+    "summary": {
+      "last_price": 25000.0,
+      "mode": "disabled",
+      "stats": {
+        "l1_hits": 0,
+        "l2_hits": 0,
+        "l3_fetches": 1
+      }
+    },
+    "trace_digest": "sha256:b5da6496de0d8cf68fe8f43635069cbf51a82d253210ce57af6138a710916f9d"
+  },
   "velocity_down": {
     "case_id": "velocity_down",
     "summary": {

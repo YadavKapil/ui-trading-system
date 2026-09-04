@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,8 @@ def test_actual_release_replay_matches_compact_expectation_when_dataset_present(
     expected = _expectations()["cases"][case_name]
     dataset_root = DATA_ROOT / expected["dataset_dir"]
     if not dataset_root.exists():
+        if os.getenv("WAVE_REPLAY_REQUIRE_ACTUAL") == "1":
+            pytest.fail(f"required release dataset not present: {dataset_root}")
         pytest.skip(f"ignored release dataset not present: {dataset_root}")
     dataset = ReplayDataset.load(dataset_root)
     scenario = ReplayScenario.load(SCENARIO_ROOT / expected["scenario"])
@@ -68,6 +71,8 @@ def test_actual_release_missing_fail_policy_when_dataset_present():
     expected = _expectations()["missing_fail"]
     dataset_root = DATA_ROOT / expected["dataset_dir"]
     if not dataset_root.exists():
+        if os.getenv("WAVE_REPLAY_REQUIRE_ACTUAL") == "1":
+            pytest.fail(f"required release dataset not present: {dataset_root}")
         pytest.skip(f"ignored release dataset not present: {dataset_root}")
     dataset = ReplayDataset.load(dataset_root)
     scenario = ReplayScenario.load(SCENARIO_ROOT / expected["scenario"])

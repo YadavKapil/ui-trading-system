@@ -42,6 +42,11 @@ EXECUTABLE_CASES = (
     "market_close",
     "restart_recovery",
     "two_workers_shared_broker",
+    "reconnect_lifecycle",
+    "memcache_hit",
+    "memcache_miss",
+    "memcache_error",
+    "memcache_disabled",
 )
 
 
@@ -139,7 +144,15 @@ def execute_case(case_id: str) -> dict[str, Any]:
         return _execute_legacy_auto_reprice()
     if case_id == "manual_reprice":
         return _execute_legacy_manual_reprice()
-    if case_id in {"restart_recovery", "two_workers_shared_broker"}:
+    if case_id in {
+        "restart_recovery",
+        "two_workers_shared_broker",
+        "reconnect_lifecycle",
+        "memcache_hit",
+        "memcache_miss",
+        "memcache_error",
+        "memcache_disabled",
+    }:
         return _execute_worker_lifecycle(case_id)
     if case_id in {"long_buy_restriction", "velocity_down"}:
         return _execute_legacy_direction(case_id)
@@ -295,6 +308,7 @@ def _execute_worker_lifecycle(case_id: str) -> dict[str, Any]:
     trace, scheduler, tasks, engine, ticker, kite = _harness()
     clock = SimClock(scheduler)
     clock.bind_task_runtime(tasks)
+    memcache_mode = case_id.removeprefix("memcache_") if case_id.startswith("memcache_") else "disabled"
     with ReplayBootstrap(
         repository_root=Path.cwd(),
         scheduler=scheduler,
@@ -303,9 +317,23 @@ def _execute_worker_lifecycle(case_id: str) -> dict[str, Any]:
         fake_kite=kite,
         fake_ticker=ticker,
         trace=trace,
+        memcache_mode=memcache_mode,
     ) as bootstrap:
         first = bootstrap.load_worker("worker-a", [])
-        if case_id == "restart_recovery":
+        if case_id.startswith("memcache_"):
+            cache = first._memcache_client
+            symbol = first.nifty_symbol
+            engine.set_quote(symbol, last_price=Decimal("25000"), instrument_token=256265)
+            cache.values[f"idx_quote:{symbol}".encode()] = (
+                b'{"last_price":24999.5,"instrument_token":256265}'
+            )
+            quote = first._get_index_quote_cached(symbol)
+            summary = {
+                "mode": cache.mode,
+                "last_price": quote["last_price"],
+                "stats": first._index_quote_stats[symbol],
+            }
+        elif case_id == "restart_recovery":
             callbacks = []
             first.kws.on_order_update = lambda _ws, data: callbacks.append(("crashed", data["status"]))
             first.kws.connect()
@@ -327,7 +355,7 @@ def _execute_worker_lifecycle(case_id: str) -> dict[str, Any]:
                 "worker_modules_distinct": first is not restarted,
                 "post_restart_callback_workers": sorted({worker for worker, _status in callbacks}),
             }
-        else:
+        elif case_id == "two_workers_shared_broker":
             second = bootstrap.load_worker("worker-b", [])
             received = []
             first.kws.on_order_update = lambda _ws, data: received.append(("a", data["status"]))
@@ -342,6 +370,25 @@ def _execute_worker_lifecycle(case_id: str) -> dict[str, Any]:
                 "worker_modules_distinct": first is not second,
                 "listeners": sorted({worker for worker, _status in received}),
                 "shared_broker_order": broker_order in engine.orders_by_id,
+            }
+        else:
+            callbacks = []
+            first._subscribed_tokens = [101, 202]
+            on_connect = lambda _ws, _response: callbacks.append("connect")
+            first.initialise_ticker(lambda *_args: None, on_connect, lambda *_args: None)
+            scheduler.run()
+            first.kws._ticker.deliver("noreconnect", {}, listener_id=first.kws.listener_id)
+            scheduler.run()
+            first.kws.close()
+            first.initialise_ticker(lambda *_args: None, on_connect, lambda *_args: None)
+            scheduler.run()
+            summary = {
+                "callbacks": callbacks,
+                "connected": first.kws._ticker._listeners[first.kws.listener_id].connected,
+                "generation": first.kws._ticker._listeners[first.kws.listener_id].generation,
+                "noreconnect_recorded": first._ws_last_noreconnect_at == scheduler.now.timestamp(),
+                "subscriptions_restored": first.kws._ticker._listeners[first.kws.listener_id].subscriptions,
+                "user_agent_callable": first.kws._user_agent() == "wave-replay",
             }
     trace.add(
         "CHARACTERIZATION_RESULT",
