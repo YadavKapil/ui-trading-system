@@ -3221,7 +3221,13 @@ def get_instrument_details(symbol):
         # Calculate days_to_expiry if needed since SQLite stores raw expiry date
         if 'expiry' in details and details['expiry']:
             today = datetime.date.today()
-            expiry_date = datetime.datetime.strptime(details['expiry'], '%Y-%m-%d').date()
+            expiry_value = details['expiry']
+            if isinstance(expiry_value, datetime.datetime):
+                expiry_date = expiry_value.date()
+            elif isinstance(expiry_value, datetime.date):
+                expiry_date = expiry_value
+            else:
+                expiry_date = datetime.date.fromisoformat(str(expiry_value))
             details['days_to_expiry'] = int(np.busday_count(today, expiry_date) + 1)
         return details
         

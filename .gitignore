@@ -12,6 +12,7 @@ configfile.ini
 *.db-wal
 *.sqlite*
 instruments.db*
+.last_instrument_sync
 trade_journal.db*
 api_monitor.db*
 
