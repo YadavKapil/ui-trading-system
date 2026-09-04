@@ -10,7 +10,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 
 from .faults import FaultScript, raise_failure
-from .fill_models import close_only_fill
+from .fill_models import close_only_fill, validate_sibling_bracket
 from .normalize import state_hash
 from .schemas import MarketBar, VisibilityOffsets
 from .scheduler import DeterministicScheduler
@@ -36,6 +36,7 @@ class BrokerOrder:
     filled_quantity: int = 0
     average_price: Decimal = Decimal("0")
     variety: str = "regular"
+    bracket_id: str | None = None
     history: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @property
@@ -59,6 +60,7 @@ class BrokerOrder:
             "status": self.status,
             "tag": self.tag,
             "variety": self.variety,
+            "bracket_id": self.bracket_id,
         }
 
 
@@ -143,6 +145,7 @@ class BrokerEngine:
         self.fees_paid = Decimal("0")
         self.realized_pnl = Decimal("0")
         self._brokerage_charged_orders: set[str] = set()
+        self.fill_events: list[dict[str, Any]] = []
 
     def bind_callback_dispatch(self, callback: Callable[[dict[str, Any], float, int], None]) -> None:
         self._callback_dispatch = callback
@@ -182,8 +185,26 @@ class BrokerEngine:
             tag=str(request.get("tag", "")),
             created_at=self.scheduler.now,
             variety=str(request.get("variety", "regular")),
+            bracket_id=request.get("bracket_id"),
         )
         self.orders_by_id[order_id] = order
+        if order.bracket_id is None:
+            sibling = next(
+                (
+                    candidate
+                    for candidate in reversed(list(self.orders_by_id.values()))
+                    if candidate.order_id != order.order_id
+                    and candidate.symbol == order.symbol
+                    and candidate.side != order.side
+                    and candidate.bracket_id is None
+                    and candidate.status in {"OPEN", "ACK"}
+                ),
+                None,
+            )
+            if sibling is not None:
+                pair_id = f"pair-{sibling.order_id}-{order.order_id}"
+                sibling.bracket_id = pair_id
+                order.bracket_id = pair_id
         self._transition(order, "ACK", callback_delay=self.visibility.callback_seconds)
         self._transition(order, "OPEN", callback_delay=self.visibility.callback_seconds)
         self.trace.add(
@@ -262,6 +283,21 @@ class BrokerEngine:
             instrument_token=self._instrument_token_for(bar.symbol),
         )
         self._mark_to_market(bar.symbol, bar.close)
+        active = [
+            order
+            for order in self.orders_by_id.values()
+            if order.symbol == bar.symbol and order.status in {"OPEN", "PARTIAL"}
+        ]
+        brackets: dict[str, list[BrokerOrder]] = defaultdict(list)
+        for order in active:
+            bracket_key = self._bracket_key(order)
+            if bracket_key is not None:
+                brackets[bracket_key].append(order)
+        for orders in brackets.values():
+            buys = [order.price for order in orders if order.side == "BUY"]
+            sells = [order.price for order in orders if order.side == "SELL"]
+            if buys and sells:
+                validate_sibling_bracket(max(buys), min(sells))
         filled: list[str] = []
         for order in sorted(self.orders_by_id.values(), key=lambda item: int(item.order_id)):
             if order.symbol != bar.symbol or order.status not in {"OPEN", "PARTIAL"}:
@@ -290,8 +326,6 @@ class BrokerEngine:
             if decision.touched and decision.fill_price is not None:
                 self._apply_fill(order, quantity=order.remaining, price=decision.fill_price, complete=True)
                 filled.append(order.order_id)
-        if filled:
-            self._mark_to_market(bar.symbol, bar.close)
         return filled
 
     def place_gtt(self, **request: Any) -> dict[str, int]:
@@ -519,6 +553,22 @@ class BrokerEngine:
         position["last_price"] = float(price)
         position["realised"] = float(Decimal(str(position.get("realised", 0))) + realized_delta)
         position["m2m"] = float((price - new_average) * new_net)
+        fill_event = {
+            "order_id": order.order_id,
+            "at": self.scheduler.now.isoformat(),
+            "side": order.side,
+            "quantity": quantity,
+            "price": str(price),
+            "cumulative_quantity": order.filled_quantity,
+            "complete": complete,
+        }
+        self.fill_events.append(fill_event)
+        self.trace.add(
+            "BROKER_FILL",
+            at=self.scheduler.now,
+            actor=f"order-{order.order_id}",
+            details=dict(fill_event),
+        )
         quantity_key = "buy_quantity" if order.side == "BUY" else "sell_quantity"
         price_key = "buy_price" if order.side == "BUY" else "sell_price"
         old_qty = int(position[quantity_key])
@@ -537,6 +587,9 @@ class BrokerEngine:
             "COMPLETE" if complete else "PARTIAL",
             callback_delay=self.visibility.callback_seconds,
         )
+        latest_mark = self._latest_mark_for_symbol(order.symbol)
+        if latest_mark is not None:
+            self._mark_to_market(order.symbol, latest_mark)
 
     def _mark_to_market(self, symbol: str, price: Decimal) -> None:
         position = self.positions_by_symbol.get(symbol)
@@ -552,6 +605,12 @@ class BrokerEngine:
             lambda snapshot=snapshot: self._publish_positions(snapshot),
             priority=self.visibility.positions_priority,
         )
+
+    def _latest_mark_for_symbol(self, symbol: str) -> Decimal | None:
+        for key, quote in self.latest_quotes.items():
+            if key == symbol or key.endswith(f":{symbol}"):
+                return Decimal(str(quote["last_price"]))
+        return None
 
     def _publish_positions(self, snapshot: dict[str, dict[str, Any]]) -> None:
         self._visible_positions = {key: dict(value) for key, value in snapshot.items()}
@@ -578,3 +637,9 @@ class BrokerEngine:
             if order.symbol == symbol and order.instrument_token:
                 return order.instrument_token
         return 0
+
+    @staticmethod
+    def _bracket_key(order: BrokerOrder) -> str | None:
+        if order.bracket_id:
+            return f"explicit:{order.bracket_id}"
+        return None

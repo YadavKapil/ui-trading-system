@@ -289,6 +289,51 @@ def _validate_inventory(
         "source_broker_token_available": False,
         "fee_model": "upstox_approximation",
     }
+    is_authoritative_v11 = manifest.schema_version == "1.1.0"
+    integrity_profile = (
+        "wave-replay-authoritative-sessions-v2"
+        if is_authoritative_v11
+        else "wave-replay-bound-sources-v1"
+    )
+    profile_identity = manifest.identity.get("integrity_profile")
+    profile_contract = manifest.data_contract.get("integrity_profile")
+    if profile_identity != integrity_profile or profile_contract != integrity_profile:
+        if not allow_legacy_provenance:
+            report.error(f"Release dataset requires integrity_profile={integrity_profile}")
+    if is_authoritative_v11:
+        calendar_profile = "lean-market-hours-requested-range-v1"
+        coverage = manifest.data_contract.get("underlying_session_coverage")
+        if (
+            manifest.identity.get("session_calendar_profile") != calendar_profile
+            or manifest.data_contract.get("session_calendar_profile") != calendar_profile
+            or not isinstance(coverage, dict)
+            or coverage.get("profile") != calendar_profile
+        ):
+            report.error("Authoritative session calendar profile is inconsistent")
+        else:
+            definition = coverage.get("definition")
+            definition_hash = __import__("hashlib").sha256(
+                (
+                    __import__("json").dumps(
+                        definition,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                not definition
+                or coverage.get("definition_sha256") != definition_hash
+                or manifest.identity.get("session_calendar_definition_sha256") != definition_hash
+            ):
+                report.error("Authoritative session calendar definition hash is inconsistent")
+            if (
+                coverage.get("coverage_complete") is not True
+                or coverage.get("equivalence_eligible") is not True
+            ):
+                report.error("Authoritative underlying session coverage is not equivalence eligible")
     for key, expected in required_contract.items():
         if manifest.data_contract.get(key) != expected:
             report.error(f"Manifest data_contract {key} must be {expected!r}")
@@ -323,7 +368,8 @@ def _validate_inventory(
         or manifest.identity.get("implementation_commit") != implementation_commit
     ):
         report.error("Producer implementation_commit provenance is inconsistent")
-    if {"config", "lean_data", "raw_cache"} <= set(manifest.source):
+    modern_provenance = {"config", "lean_data", "raw_cache"} <= set(manifest.source)
+    if modern_provenance:
         source_projection = {
             "config_source_commit": manifest.source["config"].get("repository_commit"),
             "lean_data_source_commit": manifest.source["lean_data"].get("repository_commit"),
@@ -387,17 +433,71 @@ def _validate_inventory(
     fee_hash = sha256_file(root / "fee_schedule.json") if (root / "fee_schedule.json").exists() else ""
     if fee_hash != manifest.fee_schedule_sha256:
         report.error("fee_schedule_sha256 mismatch")
+    if (root / "fee_schedule.json").exists():
+        fee_document = json.loads((root / "fee_schedule.json").read_text(encoding="utf-8"))
+        fee_expectations = {
+            "usage_label": "upstox_approximation",
+            "broker_fee_model": "upstox_approximation",
+            "broker_fidelity": "not_zerodha",
+            "approximation_only": True,
+            "resolved_schedule_id": "latest-2026-04",
+            "date_effective_for_historical_sessions": False,
+        }
+        for key, expected in fee_expectations.items():
+            if fee_document.get(key) != expected:
+                report.error(f"Fee approximation metadata mismatch for {key}")
+        reason = fee_document.get("historical_approximation_reason")
+        if (
+            not reason
+            or manifest.data_contract.get("broker_fee_model") != "upstox_approximation"
+            or manifest.data_contract.get("resolved_fee_schedule_id") != fee_document.get("resolved_schedule_id")
+            or manifest.data_contract.get("fee_date_effective_for_historical_sessions") is not False
+            or manifest.data_contract.get("historical_fee_approximation_reason") != reason
+        ):
+            report.error("Manifest and fee schedule approximation metadata are inconsistent")
     if (root / "validation_report.json").exists():
         producer_validation = json.loads((root / "validation_report.json").read_text(encoding="utf-8"))
         if producer_validation.get("valid") is not True:
             report.error("Producer validation_report.json is not valid")
-        outage_count = int(producer_validation.get("counts", {}).get("option_session_outages", 0))
+        counts = producer_validation.get("counts", {})
+        if modern_provenance and (
+            "option_session_outages" not in counts
+            or "option_session_outage_dates" not in producer_validation
+            or "option_session_outage_dates" not in manifest.data_contract
+        ):
+            report.error("Modern release provenance requires option-session outage declarations")
+        outage_count = int(counts.get("option_session_outages", 0))
         outage_dates = list(producer_validation.get("option_session_outage_dates", []))
         contract_dates = list(manifest.data_contract.get("option_session_outage_dates", []))
         if outage_count != len(outage_dates) or outage_dates != contract_dates:
             report.error("Option session outage metadata is inconsistent")
         report.missingness["option_session_outages"] = outage_count
         report.option_session_outage_dates = outage_dates
+        if is_authoritative_v11:
+            coverage = producer_validation.get("underlying_session_coverage")
+            manifest_coverage = manifest.data_contract.get("underlying_session_coverage")
+            if coverage != manifest_coverage:
+                report.error("Underlying session coverage differs between manifest and validation report")
+            missing_dates = list(producer_validation.get("underlying_session_outage_dates", []))
+            partial_dates = list(
+                manifest_coverage.get("partial_underlying_session_dates", [])
+                if isinstance(manifest_coverage, dict)
+                else []
+            )
+            if (
+                int(counts.get("missing_underlying_sessions", -1)) != len(missing_dates)
+                or int(counts.get("partial_underlying_sessions", -1)) != len(partial_dates)
+            ):
+                report.error("Underlying session outage counts are inconsistent")
+        if modern_provenance and (
+            "contract_session_outages" not in counts
+            or "contract_session_outages" not in producer_validation
+            or "contract_session_outages" not in manifest.data_contract
+        ):
+            report.error("Modern release provenance requires contract-session outage declarations")
+        report.provenance["producer_contract_session_outages"] = producer_validation.get(
+            "contract_session_outages", []
+        )
 
 
 def _validate_rows(
@@ -478,11 +578,20 @@ def _validate_rows(
             report.error(f"Source-preferred lot_size policy mismatch for {contract.instrument_id}")
         if contract.underlying != "NIFTY" or contract.market != "india" or contract.source_interval != "1minute":
             report.error(f"Contract semantic scope mismatch for {contract.instrument_id}")
-        if not (
-            contract.first_session_date <= contract.last_session_date <= contract.expiry
-            and contract.first_bar <= contract.last_bar
-        ):
-            report.error(f"Contract lifecycle bounds invalid for {contract.instrument_id}")
+        if contract.observed_bar_count:
+            if (
+                contract.first_session_date is None
+                or contract.last_session_date is None
+                or contract.first_bar is None
+                or contract.last_bar is None
+                or not (
+                    contract.first_session_date <= contract.last_session_date <= contract.expiry
+                    and contract.first_bar <= contract.last_bar
+                )
+            ):
+                report.error(f"Contract lifecycle bounds invalid for {contract.instrument_id}")
+        elif contract.first_bar is not None or contract.last_bar is not None:
+            report.error(f"Declaration-only contract availability must be null for {contract.instrument_id}")
 
     contracts_by_id = {contract.instrument_id: contract for contract in contracts}
     option_counts: dict[str, int] = defaultdict(int)
@@ -499,7 +608,7 @@ def _validate_rows(
         if option_counts[contract.instrument_id] != contract.observed_bar_count:
             report.error(f"Contract observed_bar_count mismatch for {contract.instrument_id}")
         times = option_times.get(contract.instrument_id, [])
-        if times and (
+        if times and contract.first_bar is not None and contract.last_bar is not None and (
             min(times).astimezone(dt.timezone.utc) != contract.first_bar.astimezone(dt.timezone.utc)
             or max(times).astimezone(dt.timezone.utc) != contract.last_bar.astimezone(dt.timezone.utc)
         ):
@@ -620,6 +729,28 @@ def _validate_raw_tables(
     request_end = str(manifest.request.get("end_date"))
     if sessions and (min(sessions) != request_start or max(sessions) != request_end):
         report.error("Manifest request date range does not match session table")
+    coverage = manifest.data_contract.get("underlying_session_coverage")
+    if manifest.schema_version == "1.1.0" and isinstance(coverage, dict):
+        expected_dates = sorted(coverage.get("expected_session_dates", []))
+        if expected_dates != sorted(sessions):
+            report.error("Authoritative expected session dates do not match sessions table")
+        definition = coverage.get("definition", {})
+        segments = definition.get("market_segments", {})
+        holidays = set(definition.get("holidays", []))
+        derived_dates = []
+        cursor = dt.date.fromisoformat(request_start)
+        end_date = dt.date.fromisoformat(request_end)
+        weekday_names = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+        while cursor <= end_date:
+            if segments.get(weekday_names[cursor.weekday()]) and cursor.isoformat() not in holidays:
+                derived_dates.append(cursor.isoformat())
+            cursor += dt.timedelta(days=1)
+        if derived_dates != expected_dates:
+            report.error("Authoritative expected session dates are not derived from calendar definition")
+    option_session_dates = {str(row["session_date"]) for row in tables["option_bars"]}
+    derived_outages = sorted(set(sessions) - option_session_dates)
+    if derived_outages != sorted(report.option_session_outage_dates):
+        report.error("Option session outage declarations do not match Arrow contents")
     underlying_counts: dict[str, int] = defaultdict(int)
     for row in tables["underlying_bars"]:
         underlying_counts[str(row.get("session_date"))] += 1
@@ -703,6 +834,10 @@ def _validate_raw_tables(
     for row in tables["contracts"]:
         if row.get("source_interval") != "1minute":
             report.error(f"Contract source_interval must be 1minute for {row.get('instrument_id')}")
+        if row["first_session_date"] is None:
+            if int(row["observed_bar_count"]) != 0 or int(row["sessions_observed"]) != 0:
+                report.error(f"Declaration-only contract counts invalid for {row.get('instrument_id')}")
+            continue
         first_session = str(row["first_session_date"])
         last_session = str(row["last_session_date"])
         contract_sessions = [
@@ -755,3 +890,27 @@ def _validate_raw_tables(
             members = source_members[str(row.get("source_archive"))]
             if members.get(row.get("source_member")) != row.get("source_member_sha256"):
                 report.error(f"Underlying source member provenance mismatch for {row.get('instrument_id')}")
+    declared_contract_outages = manifest.data_contract.get("contract_session_outages", {})
+    validation_contract_outages = report.provenance.get("producer_contract_session_outages", [])
+    derived_contract_outages = []
+    option_dates_by_contract = {
+        instrument_id: dates for instrument_id, dates in option_dates_by_contract.items()
+    }
+    for row in tables["contracts"]:
+        if row["first_session_date"] is None:
+            continue
+        observed = option_dates_by_contract.get(str(row["instrument_id"]), set())
+        for day, session in sorted(sessions.items()):
+            if str(row["first_session_date"]) <= day <= min(str(row["expiry"]), request_end) and day not in observed:
+                derived_contract_outages.append({
+                    "instrument_id": row["instrument_id"],
+                    "session_date": day,
+                    "missing_bar_count": int(session["expected_bar_count"]),
+                })
+    derived_contract_outages.sort(key=lambda value: (value["instrument_id"], value["session_date"]))
+    if (
+        declared_contract_outages.get("count") != len(derived_contract_outages)
+        or declared_contract_outages.get("rows") != derived_contract_outages
+        or validation_contract_outages != derived_contract_outages
+    ):
+        report.error("Contract session outage declarations do not match Arrow contents")

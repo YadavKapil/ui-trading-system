@@ -1044,7 +1044,9 @@ For a valid positive bracket, enforce `buy_limit < sell_limit`; one close then c
 
 Because `close_only` ignores intraminute high/low touches, it will generally miss touches and undercount fills relative to a live/tick replay. Reports must label `trigger_mode=close_only`, count close-cross fills, and state this expected downward fill bias. Compare it later against `ohlc_touch_branched` on the same dataset and configuration.
 
-### 10.8 Sensitivity trigger mode: `ohlc_touch_branched`
+### 10.8 Deferred sensitivity mode: `ohlc_touch_branched`
+
+**Implementation status:** explicitly deferred beyond approved stages 1-10. The initial shipped simulator implements `close_only` only. The design below remains the later sensitivity contract and must not be inferred as implemented.
 
 Convert each one-minute bar into an availability event at `bar_end`. Evaluate its full range only for orders that became eligible from a prior completed close and were active as the bar interval began. An order created from `C_t` never uses bar `t`; bar `t+1` is its first eligible full-range bar. Never apply already elapsed high/low to an order activated mid-bar by a scripted broker event.
 

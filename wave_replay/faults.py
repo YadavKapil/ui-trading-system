@@ -13,6 +13,7 @@ class ScriptedFailure:
     error_type: str
     message: str
     apply_side_effect: bool = False
+    stale_result: Any = None
 
 
 class FaultScript:
@@ -29,6 +30,7 @@ class FaultScript:
                 error_type=str(event.get("error_type", "RuntimeError")),
                 message=str(event.get("message", "scripted failure")),
                 apply_side_effect=bool(event.get("apply_side_effect", False)),
+                stale_result=event.get("stale_result"),
             )
         self._events[failure.operation].append(failure)
 

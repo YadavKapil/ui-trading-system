@@ -30,8 +30,29 @@ CHARACTERIZATION_MATRIX = (
     CharacterizationCase("rest-lag", "visibility", "Callback precedes order and position REST visibility"),
     CharacterizationCase("restart-with-open-orders", "restart", "Fresh worker sees broker orders from a crashed worker"),
     CharacterizationCase("market-close-exit", "market_hours", "No replacement/GTT is placed after close"),
-    CharacterizationCase("two-workers-shared-delta", "multi_instance", "Distinct worker globals share account broker truth"),
+    CharacterizationCase("two-workers-shared-broker", "multi_instance", "Distinct worker globals share account broker truth"),
 )
+
+DECLARED_TO_EXECUTABLE = {
+    "neutral-duo": "neutral_cycle",
+    "long-buy-restriction": "long_buy_restriction",
+    "short-step-scale": "step_delta_velocity_fill_cooldown",
+    "hard-delta-buy": "hard_delta_restriction",
+    "hard-delta-sell": "hard_delta_restriction",
+    "velocity-up": "step_delta_velocity_fill_cooldown",
+    "velocity-down": "velocity_down",
+    "same-side-cooldown": "step_delta_velocity_fill_cooldown",
+    "sibling-cancel-race": "sibling_cancellation",
+    "manual-reprice": "manual_reprice",
+    "auto-reprice": "auto_reprice",
+    "gtt-complete-before-open": "gtt_complete_before_open",
+    "partial-then-reject": "partial_then_reject",
+    "callback-poll-same-time": "callback_poll_race",
+    "rest-lag": "rest_lag",
+    "restart-with-open-orders": "restart_recovery",
+    "market-close-exit": "market_close",
+    "two-workers-shared-broker": "two_workers_shared_broker",
+}
 
 
 def matrix_by_category() -> dict[str, tuple[CharacterizationCase, ...]]:

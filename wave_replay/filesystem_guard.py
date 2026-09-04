@@ -23,6 +23,7 @@ class UnexpectedFilesystemAccess(PermissionError):
 class FilesystemGuard:
     def __init__(self, *, sandbox_root: Path) -> None:
         self.sandbox_root = sandbox_root.resolve()
+        self._resolving = False
         roots = {Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve()}
         roots.update(Path(value).resolve() for value in site.getsitepackages())
         user_site = site.getusersitepackages()
@@ -34,7 +35,14 @@ class FilesystemGuard:
     def _resolve(self, value: Any) -> Path | None:
         if isinstance(value, int):
             return None
-        return Path(os.fspath(value)).resolve()
+        absolute = os.path.abspath(os.fspath(value))
+        if self._resolving:
+            return Path(absolute)
+        self._resolving = True
+        try:
+            return Path(os.path.realpath(absolute))
+        finally:
+            self._resolving = False
 
     @staticmethod
     def _is_write_mode(mode: str) -> bool:
@@ -90,6 +98,15 @@ class FilesystemGuard:
         original_mkdir = os.mkdir
         original_makedirs = os.makedirs
         original_rmdir = os.rmdir
+        original_stat = os.stat
+        original_lstat = os.lstat
+        original_readlink = os.readlink
+        xattr_names = [
+            name
+            for name in ("getxattr", "listxattr", "setxattr", "removexattr")
+            if hasattr(os, name)
+        ]
+        original_xattrs = {name: getattr(os, name) for name in xattr_names}
         single_mutators = {
             name: getattr(os, name)
             for name in ("truncate", "chmod", "chown", "lchmod", "utime")
@@ -173,6 +190,21 @@ class FilesystemGuard:
             self.check(path, operation="rmdir", write=True)
             return original_rmdir(path, *args, **kwargs)
 
+        def guarded_stat(path, *args, **kwargs):
+            self.reject_dir_fds(kwargs)
+            self.check(path, operation="stat", write=False)
+            return original_stat(path, *args, **kwargs)
+
+        def guarded_lstat(path, *args, **kwargs):
+            self.reject_dir_fds(kwargs)
+            self.check(path, operation="lstat", write=False)
+            return original_lstat(path, *args, **kwargs)
+
+        def guarded_readlink(path, *args, **kwargs):
+            self.reject_dir_fds(kwargs)
+            self.check(path, operation="readlink", write=False)
+            return original_readlink(path, *args, **kwargs)
+
         def guarded_loader_get_data(loader, path):
             self.check(path, operation="import.get_data", write=False)
             return original_loader_get_data(loader, path)
@@ -191,6 +223,9 @@ class FilesystemGuard:
         os.mkdir = guarded_mkdir
         os.makedirs = guarded_makedirs
         os.rmdir = guarded_rmdir
+        os.stat = guarded_stat
+        os.lstat = guarded_lstat
+        os.readlink = guarded_readlink
         importlib.machinery.SourceFileLoader.get_data = guarded_loader_get_data
         for name, original in single_mutators.items():
             def single_guard(path, *args, _name=name, _original=original, **kwargs):
@@ -207,6 +242,17 @@ class FilesystemGuard:
                 return _original(source, destination, *args, **kwargs)
 
             setattr(os, name, dual_guard)
+        for name, original in original_xattrs.items():
+            def xattr_guard(path, *args, _name=name, _original=original, **kwargs):
+                self.reject_dir_fds(kwargs)
+                self.check(
+                    path,
+                    operation=_name,
+                    write=_name in {"setxattr", "removexattr"},
+                )
+                return _original(path, *args, **kwargs)
+
+            setattr(os, name, xattr_guard)
         guarded_platform_names = {
             name
             for name in (
@@ -219,6 +265,10 @@ class FilesystemGuard:
                 "replace",
                 "mkdir",
                 "rmdir",
+                "stat",
+                "lstat",
+                "readlink",
+                *xattr_names,
                 *single_mutators.keys(),
                 *dual_mutators.keys(),
             )
@@ -236,8 +286,13 @@ class FilesystemGuard:
                 setattr(os, name, original)
             for name, original in single_mutators.items():
                 setattr(os, name, original)
+            for name, original in original_xattrs.items():
+                setattr(os, name, original)
             importlib.machinery.SourceFileLoader.get_data = original_loader_get_data
             os.rmdir = original_rmdir
+            os.readlink = original_readlink
+            os.lstat = original_lstat
+            os.stat = original_stat
             os.makedirs = original_makedirs
             os.mkdir = original_mkdir
             os.replace = original_replace

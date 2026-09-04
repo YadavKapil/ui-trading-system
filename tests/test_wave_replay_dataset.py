@@ -37,7 +37,7 @@ def replay_dataset(tmp_path):
 
 def test_synthetic_v1_validates_exact_corpus_and_lot_sizes(replay_dataset):
     assert replay_dataset.manifest.schema == "wave-replay-dataset-v1"
-    assert replay_dataset.manifest.schema_version == "1.0.0"
+    assert replay_dataset.manifest.schema_version == "1.1.0"
     assert len(replay_dataset.underlying_bars) == 1875
     assert len(replay_dataset.option_bars) == 1863
     assert replay_dataset.validation_report.missingness["option_missing_bars"] == 12
@@ -55,7 +55,7 @@ def test_synthetic_v1_validates_exact_corpus_and_lot_sizes(replay_dataset):
         "validation_report.json",
     }
     assert replay_dataset.manifest.data_contract["replay_token_origin"] == "sha256(instrument_id)[:15]"
-    assert replay_dataset.manifest.producer["implementation_commit"] == "0639cab"
+    assert replay_dataset.manifest.producer["implementation_commit"] == "7dab0e1"
     assert replay_dataset.manifest.source["config"]["repository_commit"] == "d667bcb"
     assert replay_dataset.validation_report.missingness["option_session_outages"] == 0
 

@@ -129,9 +129,9 @@
     "regular_orders": []
   },
   "market_dataset": {
-    "dataset_id": "wave-v1-d15fcd0fc7cd6d21a66b",
+    "dataset_id": "wave-v1-ebef0d10c29534f67437",
     "date": "2025-04-07",
-    "manifest_sha256": "434955e6e017a3df5696f66f452907bcc244efa8f59bd83b757db9f5d604d823",
+    "manifest_sha256": "87e99e78f2d0c092d23bbee3d8e345523e46509b4bf69e0e933fb8645a844efa",
     "missing_quote_policy": "fail",
     "schema": "wave-replay-dataset-v1"
   },
@@ -141,7 +141,7 @@
     "buy_gap_pct": 0.1,
     "cool_off_mode": "disabled",
     "equivalence_status": "modeled_not_exact",
-    "fee_schedule_sha256": "f18efb314d04fd7c33d2df78eca26f2f15111aa33ddf953b51426bb0ce36f8fb",
+    "fee_schedule_sha256": "f84dac4068de476c3be1ae1148396d4ed67f6385055ab69f49c8bc70b46a05e7",
     "fill_price_mode": "limit",
     "lots": 1,
     "market_resolution": "1minute",
@@ -195,6 +195,7 @@
       "lots": 1,
       "option_close_at_selection": "436.4000",
       "order_mode": "regular",
+      "replay_instrument_token": 889007279950470712,
       "sell_gap_pct": 0.1,
       "sell_gap_points": "43.6",
       "sell_quantity": 75,

@@ -234,8 +234,8 @@ class Contract:
     expiry_classification: str
     classification_method: str
     source_interval: str
-    first_session_date: dt.date
-    last_session_date: dt.date
+    first_session_date: dt.date | None
+    last_session_date: dt.date | None
     lot_size: int
     source_contract_multiplier: int | None
     resolved_contract_multiplier: int
@@ -243,8 +243,8 @@ class Contract:
     observed_bar_count: int
     missing_bar_count: int
     sessions_observed: int
-    first_bar: dt.datetime
-    last_bar: dt.datetime
+    first_bar: dt.datetime | None
+    last_bar: dt.datetime | None
     source_contract_metadata_sha256: str
 
     @property
@@ -288,8 +288,8 @@ class Contract:
             expiry_classification=str(row["expiry_classification"]),
             classification_method=str(row["classification_method"]),
             source_interval=str(row["source_interval"]),
-            first_session_date=row["first_session_date"] if isinstance(row["first_session_date"], dt.date) else dt.date.fromisoformat(str(row["first_session_date"])),
-            last_session_date=row["last_session_date"] if isinstance(row["last_session_date"], dt.date) else dt.date.fromisoformat(str(row["last_session_date"])),
+            first_session_date=None if row["first_session_date"] is None else row["first_session_date"] if isinstance(row["first_session_date"], dt.date) else dt.date.fromisoformat(str(row["first_session_date"])),
+            last_session_date=None if row["last_session_date"] is None else row["last_session_date"] if isinstance(row["last_session_date"], dt.date) else dt.date.fromisoformat(str(row["last_session_date"])),
             lot_size=int(row["lot_size"]),
             source_contract_multiplier=None if row["source_contract_multiplier"] is None else int(row["source_contract_multiplier"]),
             resolved_contract_multiplier=int(row["resolved_contract_multiplier"]),
@@ -297,8 +297,8 @@ class Contract:
             observed_bar_count=int(row["observed_bar_count"]),
             missing_bar_count=int(row["missing_bar_count"]),
             sessions_observed=int(row["sessions_observed"]),
-            first_bar=parse_timestamp(row["first_available_at_utc"]),
-            last_bar=parse_timestamp(row["last_available_at_utc"]),
+            first_bar=None if row["first_available_at_utc"] is None else parse_timestamp(row["first_available_at_utc"]),
+            last_bar=None if row["last_available_at_utc"] is None else parse_timestamp(row["last_available_at_utc"]),
             source_contract_metadata_sha256=str(row["source_contract_metadata_sha256"]),
         )
 
@@ -385,11 +385,23 @@ class ReplayScenario:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ReplayScenario":
+        if int(value.get("schema_version", 0)) != 1:
+            raise SchemaError("Scenario schema_version must be 1")
+        if len(value.get("workers", [])) != 1:
+            raise SchemaError("Approved initial profile requires exactly one worker")
         selection = value["selection"]
         dataset = value["market_dataset"]
         worker = value["workers"][0]
         initial = value.get("initial", {})
         config = value.get("config", {})
+        if dataset.get("schema") != DATASET_SCHEMA:
+            raise SchemaError(f"market_dataset.schema must be {DATASET_SCHEMA}")
+        if dataset.get("date") != selection.get("selected_date"):
+            raise SchemaError("market_dataset.date must match selected_date")
+        if selection.get("right") != "call" or not str(selection.get("symbol", "")).startswith("NIFTY"):
+            raise SchemaError("Approved initial profile requires a NIFTY call")
+        if initial.get("cash", {}).get("currency") != "INR":
+            raise SchemaError("Approved initial profile requires INR cash")
         cash = initial.get("cash", {}).get("amount", APPROVED_DEFAULTS.starting_cash_inr)
         lot_size = int(worker["lot_size"])
         option_close = Decimal(str(worker["option_close_at_selection"]))
@@ -397,6 +409,10 @@ class ReplayScenario:
         worker_expectations = {
             "instance_id": (worker.get("instance_id"), "we-1"),
             "symbol": (worker.get("symbol"), selection["symbol"]),
+            "replay_instrument_token": (
+                int(worker.get("replay_instrument_token", 0)),
+                int(selection["replay_instrument_token"]),
+            ),
             "buy_gap_pct": (Decimal(str(worker.get("buy_gap_pct"))), Decimal("0.10")),
             "sell_gap_pct": (Decimal(str(worker.get("sell_gap_pct"))), Decimal("0.10")),
             "buy_gap_points": (Decimal(str(worker.get("buy_gap_points"))), expected_gap),
@@ -503,6 +519,7 @@ class ReplayScenario:
             "workers": [{
                 "instance_id": "we-1",
                 "symbol": self.symbol,
+                "replay_instrument_token": self.instrument_token,
                 "option_close_at_selection": str(self.option_close_at_selection),
                 "buy_gap_pct": 0.10,
                 "sell_gap_pct": 0.10,

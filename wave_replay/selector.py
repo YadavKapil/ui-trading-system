@@ -46,6 +46,7 @@ DEFAULT_WAVE_SETTINGS: dict[str, Any] = {
         "trigger_count": 2,
         "cooldown_duration_minutes": 15,
     },
+    "delta_limits": {"NIFTY": {"default": {"min": -3500, "max": 3500}}},
 }
 APPROVED_CORPUS = {
     "range": {
@@ -111,6 +112,8 @@ def select_contract_for_day(
             and contract.right == "call"
             and contract.wave_trading_symbol is not None
             and APPROVED_DEFAULTS.min_calendar_dte <= dte <= APPROVED_DEFAULTS.max_calendar_dte
+            and contract.first_bar is not None
+            and contract.last_bar is not None
             and contract.first_bar <= first.bar_end <= contract.last_bar
         ):
             candidates.append(contract)

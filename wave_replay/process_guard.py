@@ -54,7 +54,11 @@ class ProcessGuard:
         spawn_names = [
             name
             for name in dir(os)
-            if name.startswith("spawn") and callable(getattr(os, name))
+            if (
+                name.startswith("spawn")
+                or name in {"posix_spawn", "posix_spawnp"}
+            )
+            and callable(getattr(os, name))
         ]
         original_spawns = {name: getattr(os, name) for name in spawn_names}
         exec_names = [

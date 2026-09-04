@@ -266,6 +266,8 @@ class SimTaskRuntime:
         self.scheduler.cancel_pending(reason=reason)
         for task in self._tasks.values():
             if self.is_alive(task.task_id):
+                if task.greenlet is not None and not task.greenlet.dead:
+                    task.greenlet.throw(SystemExit(0))
                 task.state = "cancelled"
                 self.trace.add(
                     "TASK_CANCELLED",

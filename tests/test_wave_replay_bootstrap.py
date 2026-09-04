@@ -19,6 +19,7 @@ from wave_replay.broker_engine import BrokerEngine
 from wave_replay.clock import SimClock
 from wave_replay.fake_kite import FakeKite
 from wave_replay.fake_ticker import FakeTicker
+from wave_replay.filesystem_guard import FilesystemGuard
 from wave_replay.network_guard import UnexpectedNetworkAccess
 from wave_replay.process_guard import UnexpectedProcessAccess
 from wave_replay.schemas import IST
@@ -60,7 +61,8 @@ def test_gate_zero_imports_staged_wave_with_fakes_and_no_real_threads():
         module = bootstrap.load_worker("gate-zero", [])
         assert str(module.__file__).startswith(str(bootstrap.paths.root))
         assert module.kite is kite
-        assert module.kws is ticker
+        assert module.kws._ticker is ticker
+        assert module.kws.listener_id == "gate-zero"
         assert module._memcache_client is None
         assert not (bootstrap.paths.root / "instruments.db").exists()
         assert all(str(path).startswith(str(bootstrap.paths.root)) for path in bootstrap.paths.root.rglob("*"))
@@ -124,6 +126,27 @@ def test_replay_does_not_replace_host_time_functions():
     assert time.monotonic is original_monotonic
 
 
+def test_worker_local_date_and_datetime_follow_sim_clock_without_global_leak():
+    real_date_class = dt.date
+    trace, scheduler, tasks, clock, kite, ticker = _components()
+    with ReplayBootstrap(
+        repository_root=".",
+        scheduler=scheduler,
+        tasks=tasks,
+        clock=clock,
+        fake_kite=kite,
+        fake_ticker=ticker,
+        trace=trace,
+    ) as bootstrap:
+        module = bootstrap.load_worker("datetime-shim", [])
+        assert module.datetime.date.today().isoformat() == "2025-07-07"
+        assert module.datetime.datetime.now().isoformat().startswith("2025-07-07T09:15:00")
+        assert module.datetime.datetime.utcnow().isoformat().startswith("2025-07-07T03:45:00")
+        assert module.datetime.date is not dt.date
+        assert dt.date is real_date_class
+    assert dt.date is real_date_class
+
+
 def test_filesystem_guard_denies_real_repository_reads_and_ledgers_sandbox_access():
     real_config = Path("configfile.ini.example").resolve()
     trace, scheduler, tasks, clock, kite, ticker = _components()
@@ -147,6 +170,12 @@ def test_filesystem_guard_denies_real_repository_reads_and_ledgers_sandbox_acces
             os.chmod(real_config, 0o644)
         with pytest.raises(PermissionError, match="outside the sandbox"):
             os.utime(real_config, None)
+        with pytest.raises(PermissionError, match="outside the sandbox"):
+            os.stat(real_config)
+        with pytest.raises(PermissionError, match="outside the sandbox"):
+            os.lstat(real_config)
+        with pytest.raises(PermissionError, match="outside the sandbox"):
+            os.readlink(real_config)
         with pytest.raises(PermissionError, match="outside the sandbox"):
             _io.open(real_config, "r")
         with pytest.raises(PermissionError, match="outside the sandbox"):
@@ -298,3 +327,19 @@ def test_preopened_host_file_handler_is_detached_for_full_replay_context(tmp_pat
     finally:
         root.removeHandler(handler)
         handler.close()
+
+
+def test_filesystem_guard_resolves_symlink_or_junction_escape(tmp_path):
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    external = tmp_path / "external.txt"
+    external.write_text("secret", encoding="utf-8")
+    link = sandbox / "link.txt"
+    try:
+        link.symlink_to(external)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    guard = FilesystemGuard(sandbox_root=sandbox)
+    with guard.installed():
+        with pytest.raises(PermissionError, match="outside the sandbox"):
+            link.read_text(encoding="utf-8")

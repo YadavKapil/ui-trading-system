@@ -271,7 +271,13 @@ def create_synthetic_dataset(root: str | Path) -> Path:
     fee_schedule = {
         "schema": "wave-replay-fee-schedule-v1",
         "usage_label": "upstox_approximation",
+        "broker_fee_model": "upstox_approximation",
+        "broker": "upstox",
         "broker_fidelity": "not_zerodha",
+        "approximation_only": True,
+        "resolved_schedule_id": "latest-2026-04",
+        "date_effective_for_historical_sessions": False,
+        "historical_approximation_reason": "Approved uniform latest schedule for replay sensitivity.",
         "decision_effect": "economic_reporting_only",
         "configuration": {"broker": "upstox", "equity_product": "delivery", "schedule": "latest-2026-04"},
         "resolved_schedule": {
@@ -293,10 +299,54 @@ def create_synthetic_dataset(root: str | Path) -> Path:
     fee_path = root / "fee_schedule.json"
     fee_path.write_text(json.dumps(fee_schedule, indent=2, sort_keys=True), encoding="utf-8")
 
+    corpus_dates = {item["date"] for item in corpus}
+    synthetic_holidays = []
+    cursor = corpus[0]["date"]
+    while cursor <= corpus[-1]["date"]:
+        if cursor.weekday() < 5 and cursor not in corpus_dates:
+            synthetic_holidays.append(cursor.isoformat())
+        cursor += dt.timedelta(days=1)
+    calendar_definition = {
+        "timezone": "Asia/Kolkata",
+        "exchange_time_zone": "Asia/Kolkata",
+        "market_segments": {
+            day: ([{"start": "09:15:00", "end": "15:30:00"}] if index < 5 else [])
+            for index, day in enumerate(
+                ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+            )
+        },
+        "early_closes": {},
+        "late_opens": {},
+        "holidays": synthetic_holidays,
+    }
+    calendar_definition_hash = sha256_bytes(
+        (canonical_json(calendar_definition) + "\n").encode()
+    )
+    expected_dates = [item["date"].isoformat() for item in corpus]
+    underlying_coverage = {
+        "profile": "lean-market-hours-requested-range-v1",
+        "status": "authoritative",
+        "authority": "lean_market_hours_database",
+        "source_path": "synthetic/market-hours.json",
+        "source_sha256": sha256_bytes(b"synthetic-market-hours"),
+        "entry_key": "Index-india-[*]",
+        "definition": calendar_definition,
+        "definition_sha256": calendar_definition_hash,
+        "expected_session_dates": expected_dates,
+        "missing_underlying_session_dates": [],
+        "partial_underlying_session_dates": [],
+        "observed_special_session_dates": [],
+        "archive_only_special_session_dates": [],
+        "coverage_complete": True,
+        "equivalence_eligible": True,
+        "missing_session_policy": "explicit_session_row_without_fabricated_prices",
+        "calendar_scope": "weekly_market_hours_holidays_early_closes_late_opens",
+        "reason": None,
+    }
     validation = {
         "valid": True,
         "schema": DATASET_SCHEMA,
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "resolution_seconds": 60,
         "counts": {
             "underlying_bars": len(underlying_rows),
@@ -307,8 +357,14 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "missing_option_bars": 12,
             "source_resolved_multiplier_mismatches": 3,
             "option_session_outages": 0,
+            "contract_session_outages": 0,
+            "missing_underlying_sessions": 0,
+            "partial_underlying_sessions": 0,
         },
         "option_session_outage_dates": [],
+        "underlying_session_outage_dates": [],
+        "underlying_session_coverage": underlying_coverage,
+        "contract_session_outages": [],
         "policies": {"option_forward_fill": "forbidden"},
         "warnings": [],
     }
@@ -342,13 +398,16 @@ def create_synthetic_dataset(root: str | Path) -> Path:
     ]
     identity = {
         "schema": DATASET_SCHEMA,
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "underlying": "NIFTY",
         "market": "india",
         "start_date": corpus[0]["date"].isoformat(),
         "end_date": corpus[-1]["date"].isoformat(),
         "resolution_seconds": 60,
-        "implementation_commit": "0639cab",
+        "implementation_commit": "7dab0e1",
+        "integrity_profile": "wave-replay-authoritative-sessions-v2",
+        "session_calendar_profile": "lean-market-hours-requested-range-v1",
+        "session_calendar_definition_sha256": calendar_definition_hash,
         "config_source_commit": "d667bcb",
         "lean_data_source_commit": "d667bcb",
         "raw_cache_source_commit": "d667bcb",
@@ -358,12 +417,12 @@ def create_synthetic_dataset(root: str | Path) -> Path:
     dataset_id = f"wave-v1-{sha256_bytes((canonical_json(dataset_identity) + chr(10)).encode())[:20]}"
     manifest = {
         "schema": DATASET_SCHEMA,
-        "schema_version": "1.0.0",
+        "schema_version": "1.1.0",
         "dataset_id": dataset_id,
         "producer": {
             "repository": "synthetic-fixture",
-            "commit": "0639cab",
-            "implementation_commit": "0639cab",
+            "commit": "7dab0e1",
+            "implementation_commit": "7dab0e1",
             "command": "wave_replay create-synthetic",
             "pyarrow_version": pa.__version__,
         },
@@ -398,6 +457,8 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "end_date": corpus[-1]["date"].isoformat(),
         },
         "data_contract": {
+            "integrity_profile": "wave-replay-authoritative-sessions-v2",
+            "session_calendar_profile": "lean-market-hours-requested-range-v1",
             "resolution_seconds": 60,
             "source_timestamp_kind": "bar_start",
             "available_at": "bar_end",
@@ -406,7 +467,18 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "source_broker_token_available": False,
             "replay_lot_size_policy": "source_contract_multiplier_else_resolved",
             "fee_model": "upstox_approximation",
+            "broker_fee_model": "upstox_approximation",
+            "resolved_fee_schedule_id": "latest-2026-04",
+            "fee_date_effective_for_historical_sessions": False,
+            "historical_fee_approximation_reason": "Approved uniform latest schedule for replay sensitivity.",
             "option_session_outage_dates": [],
+            "contract_session_outages": {
+                "count": 0,
+                "rows": [],
+                "eligibility": "first_valid_member_declaration_or_observed_session_through_expiry_or_export_end",
+                "policy": "count_missing_bars_without_fabricating_prices",
+            },
+            "underlying_session_coverage": underlying_coverage,
         },
         "tables": table_manifest,
         "source_files": source_files,

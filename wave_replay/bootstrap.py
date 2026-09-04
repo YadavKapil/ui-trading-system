@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as host_datetime
 import io
 import logging
 import os
@@ -23,6 +24,7 @@ from .fake_ticker import FakeTicker
 from .filesystem_guard import FilesystemGuard
 from .import_fakes import FakeModuleInstaller
 from .network_guard import NetworkGuard
+from .normalize import sha256_file
 from .persistence import SandboxPaths
 from .process_guard import ProcessGuard
 from .scheduler import DeterministicScheduler
@@ -100,6 +102,7 @@ class ReplayBootstrap:
         self.filesystem_guard: FilesystemGuard | None = None
         self._logging_state: dict | None = None
         self._sandbox_handler: logging.Handler | None = None
+        self.source_hashes: dict[str, str] = {}
 
     def __enter__(self) -> "ReplayBootstrap":
         try:
@@ -185,7 +188,9 @@ class ReplayBootstrap:
             },
         )
         module.kite = self.fake_kite
-        module.kws = self.fake_ticker
+        ticker_facade = self.fake_ticker.facade(worker_id)
+        module.kws = ticker_facade
+        module.KiteTicker = lambda *_args, **_kwargs: ticker_facade
         module.get_ist_now = self.clock.now_ist
         time_shim = types.ModuleType(f"{worker_id}.time")
         for name in dir(host_time):
@@ -194,6 +199,41 @@ class ReplayBootstrap:
         time_shim.monotonic = self.clock.monotonic
         time_shim.sleep = lambda seconds: self.clock.sleep(seconds, reason="legacy_time.sleep")
         module.time = time_shim
+        datetime_shim = types.ModuleType(f"{worker_id}.datetime")
+        for name in dir(host_datetime):
+            setattr(datetime_shim, name, getattr(host_datetime, name))
+        clock = self.clock
+
+        class SimDate(host_datetime.date):
+            @classmethod
+            def today(cls):
+                current = clock.now_ist().date()
+                return cls(current.year, current.month, current.day)
+
+        class SimDateTime(host_datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                current = clock.now_ist()
+                if tz is not None:
+                    current = current.astimezone(tz)
+                return cls.fromtimestamp(current.timestamp(), tz=current.tzinfo)
+
+            @classmethod
+            def utcnow(cls):
+                current = clock.now_ist().astimezone(host_datetime.timezone.utc).replace(tzinfo=None)
+                return cls(
+                    current.year,
+                    current.month,
+                    current.day,
+                    current.hour,
+                    current.minute,
+                    current.second,
+                    current.microsecond,
+                )
+
+        datetime_shim.date = SimDate
+        datetime_shim.datetime = SimDateTime
+        module.datetime = datetime_shim
         module._memcache_client = None
         return module
 
@@ -282,6 +322,8 @@ class ReplayBootstrap:
             if not source.exists():
                 raise FileNotFoundError(source)
             shutil.copy2(source, self.paths.source / filename)
+            if filename.endswith(".py"):
+                self.source_hashes[filename] = sha256_file(source)
 
     def _write_config(self) -> None:
         assert self.paths is not None

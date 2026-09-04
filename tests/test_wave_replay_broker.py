@@ -168,6 +168,82 @@ def test_invalid_bracket_is_rejected():
         raise AssertionError("overlapping bracket should fail")
 
 
+def test_broker_rejects_overlapping_active_siblings_before_close_evaluation():
+    _trace, scheduler, _tasks, engine, kite = _broker()
+    _place_args = {
+        "variety": "regular",
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTYCE",
+        "quantity": 25,
+        "product": "NRML",
+        "order_type": "LIMIT",
+    }
+    kite.place_order(transaction_type="BUY", price=100, tag="B", bracket_id="bad", **_place_args)
+    kite.place_order(transaction_type="SELL", price=90, tag="S", bracket_id="bad", **_place_args)
+    scheduler.run()
+    scheduler.now += dt.timedelta(minutes=1)
+    bar = MarketBar(
+        instrument_id="id",
+        source_instrument_id="source",
+        replay_instrument_token=123,
+        wave_trading_symbol="NIFTYCE",
+        lean_symbol="lean",
+        underlying="NIFTY",
+        security_type="index_option",
+        market="india",
+        exchange="NFO",
+        session_date=scheduler.now.date(),
+        bar_start=scheduler.now - dt.timedelta(minutes=1),
+        bar_end=scheduler.now,
+        available_at=scheduler.now,
+        resolution_seconds=60,
+        open=Decimal("95"),
+        high=Decimal("101"),
+        low=Decimal("89"),
+        close=Decimal("95"),
+        volume=100,
+        open_interest=1000,
+        source_archive_sha256="hash",
+        source_archive="archive",
+        source_member="member",
+        source_member_sha256="member-hash",
+        source_row=4,
+        source_universe_sha256="universe-hash",
+    )
+    with pytest.raises(ValueError, match="INVALID_OVERLAPPING_BRACKET"):
+        engine.evaluate_close_bar(bar)
+    assert all(order.filled_quantity == 0 for order in engine.orders_by_id.values())
+
+
+def test_independent_valid_brackets_do_not_cross_validate_each_other():
+    _trace, scheduler, _tasks, engine, kite = _broker()
+    common = {
+        "variety": "regular",
+        "exchange": "NFO",
+        "tradingsymbol": "NIFTYCE",
+        "quantity": 25,
+        "product": "NRML",
+        "order_type": "LIMIT",
+    }
+    for bracket, buy, sell in (("one", 90, 110), ("two", 120, 140)):
+        kite.place_order(transaction_type="BUY", price=buy, tag=f"B-{bracket}", bracket_id=bracket, **common)
+        kite.place_order(transaction_type="SELL", price=sell, tag=f"S-{bracket}", bracket_id=bracket, **common)
+    scheduler.run()
+    scheduler.now += dt.timedelta(minutes=1)
+    bar = MarketBar(
+        instrument_id="id", source_instrument_id="source", replay_instrument_token=123,
+        wave_trading_symbol="NIFTYCE", lean_symbol="lean", underlying="NIFTY",
+        security_type="index_option", market="india", exchange="NFO",
+        session_date=scheduler.now.date(), bar_start=scheduler.now - dt.timedelta(minutes=1),
+        bar_end=scheduler.now, available_at=scheduler.now, resolution_seconds=60,
+        open=Decimal("115"), high=Decimal("116"), low=Decimal("114"), close=Decimal("115"),
+        volume=100, open_interest=1000, source_archive_sha256="hash",
+        source_archive="archive", source_member="member", source_member_sha256="member-hash",
+        source_row=5, source_universe_sha256="universe-hash",
+    )
+    engine.evaluate_close_bar(bar)
+
+
 def test_visibility_offsets_delay_callbacks_history_orders_and_positions():
     trace = TraceRecorder()
     scheduler = DeterministicScheduler(
@@ -382,6 +458,52 @@ def test_partial_fills_charge_flat_brokerage_once_per_order():
     assert abs(total_fee(True) - total_fee(False)) < Decimal("0.05")
 
 
+def test_partial_fill_events_remain_immutable_after_completion():
+    _trace, _scheduler, _tasks, engine, kite = _broker()
+    engine.set_quote("NFO:NIFTYCE", last_price=Decimal("100"), instrument_token=123)
+    order_id = kite.place_order(
+        variety="regular",
+        exchange="NFO",
+        tradingsymbol="NIFTYCE",
+        transaction_type="BUY",
+        quantity=75,
+        product="NRML",
+        order_type="LIMIT",
+        price=90,
+        tag="B",
+    )
+    engine.partial_fill(order_id, quantity=25, price=Decimal("89"))
+    first = dict(engine.fill_events[0])
+    engine._apply_fill(
+        engine.orders_by_id[order_id],
+        quantity=50,
+        price=Decimal("90"),
+        complete=True,
+    )
+    assert engine.fill_events[0] == first
+    assert engine.fill_events == [
+        {
+            "order_id": order_id,
+            "at": first["at"],
+            "side": "BUY",
+            "quantity": 25,
+            "price": "89",
+            "cumulative_quantity": 25,
+            "complete": False,
+        },
+        {
+            "order_id": order_id,
+            "at": first["at"],
+            "side": "BUY",
+            "quantity": 50,
+            "price": "90",
+            "cumulative_quantity": 75,
+            "complete": True,
+        },
+    ]
+    assert engine.positions_by_symbol["NIFTYCE"]["last_price"] == 100.0
+
+
 def test_positions_mark_to_market_on_each_completed_option_bar():
     _trace, scheduler, _tasks, engine, kite = _broker()
     order_id = kite.place_order(
@@ -488,3 +610,42 @@ def test_limit_fill_keeps_completed_close_as_current_market_mark():
     assert order.average_price == Decimal("90")
     assert position["last_price"] == 80.0
     assert position["m2m"] == -250.0
+
+
+def test_operation_specific_read_auth_and_stale_faults():
+    trace = TraceRecorder()
+    scheduler = DeterministicScheduler(
+        start=dt.datetime(2025, 7, 7, 9, 16, tzinfo=IST),
+        trace=trace,
+    )
+    operations = [
+        "generate_session",
+        "quote",
+        "positions",
+        "orders",
+        "order_history",
+        "instruments",
+        "get_gtts",
+    ]
+    engine = BrokerEngine(
+        scheduler=scheduler,
+        trace=trace,
+        faults=FaultScript([
+            {
+                "kind": "failure",
+                "operation": operation,
+                "error_type": "stale",
+                "stale_result": {"operation": operation},
+            }
+            for operation in operations
+        ]),
+    )
+    kite = FakeKite(engine)
+    assert kite.generate_session("token", "secret") == {"operation": "generate_session"}
+    assert kite.quote("NSE:NIFTY 50") == {"operation": "quote"}
+    assert kite.positions() == {"operation": "positions"}
+    assert kite.orders() == {"operation": "orders"}
+    assert kite.order_history("1") == {"operation": "order_history"}
+    assert kite.instruments() == {"operation": "instruments"}
+    assert kite.get_gtts() == {"operation": "get_gtts"}
+    assert not engine.faults.remaining()

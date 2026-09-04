@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 DATASET_SCHEMA = "wave-replay-dataset-v1"
 INITIAL_PROFILE = "nifty-atm-ce-close-only-v1"
+LEGACY_BASELINE_COMMIT = "6d0f2a974892b994f172689467423282d969a434"
 
 
 @dataclass(frozen=True)

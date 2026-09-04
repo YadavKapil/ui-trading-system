@@ -120,6 +120,11 @@ class FakeTicker:
     def crash(self, *, listener_id: str = "default") -> None:
         self.disconnect(listener_id=listener_id, reason="crash")
 
+    def remove_listener(self, listener_id: str) -> None:
+        if listener_id in self._listeners:
+            self.disconnect(listener_id=listener_id, reason="unload")
+            self._listeners.pop(listener_id, None)
+
     def subscribe(self, tokens: list[int], *, listener_id: str = "default") -> None:
         self._listeners[listener_id].subscriptions = list(tokens)
 
@@ -212,3 +217,50 @@ class FakeTicker:
 
     def order_dispatch(self, payload: dict[str, Any], delay: float, priority: int = 30) -> None:
         self.deliver("order", payload, delay=delay, priority=priority)
+
+    def facade(self, listener_id: str) -> "WorkerTickerFacade":
+        self.register_listener(listener_id)
+        return WorkerTickerFacade(self, listener_id)
+
+
+class WorkerTickerFacade:
+    """KiteTicker-shaped view whose callbacks belong to one worker listener."""
+
+    MODE_FULL = "full"
+
+    def __init__(self, ticker: FakeTicker, listener_id: str) -> None:
+        self._ticker = ticker
+        self.listener_id = listener_id
+        self.socket_url = "wss://fake.invalid"
+        self._user_agent = "wave-replay"
+        self.factory = object()
+        self.connect_timeout = 0
+
+    def _callback(self, kind):
+        return self._ticker._listeners[self.listener_id].callbacks[kind]
+
+    def _set_callback(self, kind, value):
+        self._ticker._listeners[self.listener_id].callbacks[kind] = value
+
+    on_ticks = property(lambda self: self._callback("ticks"), lambda self, value: self._set_callback("ticks", value))
+    on_connect = property(lambda self: self._callback("connect"), lambda self, value: self._set_callback("connect", value))
+    on_order_update = property(lambda self: self._callback("order"), lambda self, value: self._set_callback("order", value))
+    on_noreconnect = property(lambda self: self._callback("noreconnect"), lambda self, value: self._set_callback("noreconnect", value))
+
+    def connect(self, threaded: bool = True) -> None:
+        self._ticker.connect(threaded, listener_id=self.listener_id)
+
+    def subscribe(self, tokens: list[int]) -> None:
+        self._ticker.subscribe(tokens, listener_id=self.listener_id)
+
+    def set_mode(self, mode: str, tokens: list[int]) -> None:
+        self._ticker.set_mode(mode, tokens, listener_id=self.listener_id)
+
+    def disconnect(self) -> None:
+        self._ticker.disconnect(listener_id=self.listener_id)
+
+    def remove(self) -> None:
+        self._ticker.remove_listener(self.listener_id)
+
+    def _create_connection(self, *args, **kwargs) -> None:
+        self.connect()

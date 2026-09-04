@@ -49,6 +49,9 @@ placement cool-off disabled, same-side fill cooldown enabled, completed-close
 triggers, subsequent-bar activation, limit fills, and an explicitly labeled
 Upstox fee approximation.
 
+OHLC-touch branching remains deliberately deferred; the current historical
+simulator supports `close_only` only.
+
 ```powershell
 python -m wave_replay create-synthetic --output data\wave-replay\synthetic-v1
 python -m wave_replay validate-dataset --dataset data\wave-replay\synthetic-v1

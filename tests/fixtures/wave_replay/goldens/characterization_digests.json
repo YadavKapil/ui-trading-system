@@ -1,4 +1,14 @@
 {
+  "auto_reprice": {
+    "case_id": "auto_reprice",
+    "summary": {
+      "auto_reprice_pending_callback": true,
+      "broker_price": "80.0",
+      "legacy_price": 80.0,
+      "repriced_count": 1
+    },
+    "trace_digest": "sha256:1460462786592e5b6c9e5063463d51d4d8052065d8f3913e3875d40cef929b30"
+  },
   "callback_poll_race": {
     "case_id": "callback_poll_race",
     "summary": {
@@ -15,9 +25,12 @@
         }
       ],
       "order_id": "1",
+      "polls": [
+        []
+      ],
       "visible": "OPEN"
     },
-    "trace_digest": "sha256:453cb2d1ce8ce5bf17a7ba46ba54630ded4c141be64189ff099a59475b4211a7"
+    "trace_digest": "sha256:c8a26d6c5537589692c0d259844ec9a0a6df07295c4defc2f92d0d0a16ef4d09"
   },
   "cancel_failure": {
     "case_id": "cancel_failure",
@@ -25,7 +38,17 @@
       "failure_consumed": true,
       "status": "OPEN"
     },
-    "trace_digest": "sha256:c47d63ba6ae2b348c70ca8e014fbcb0cad2aea03eddd29bd1735160b55bd7083"
+    "trace_digest": "sha256:8e9ca04a1ddd7606e3d0a58e914ddb264c95ed6fde31cd1b534478f430b9877f"
+  },
+  "gtt_complete_before_open": {
+    "case_id": "gtt_complete_before_open",
+    "summary": {
+      "complete_before_open_processed": true,
+      "pending_gtt_removed": true,
+      "replacement_count": 1,
+      "sibling_status": "CANCELLED"
+    },
+    "trace_digest": "sha256:6f38e87de01660802403c09a6f31f6ef95c7b473e86b2802b3df910a9490b14c"
   },
   "gtt_fallback_trigger_delete_race": {
     "case_id": "gtt_fallback_trigger_delete_race",
@@ -34,7 +57,7 @@
       "child_tag": "GTT_B",
       "trigger_after_delete_race": "deleted"
     },
-    "trace_digest": "sha256:ca6b6fd47ab8ad7d998cb5dcb3b95bd04ced5d61b26032eea7e2e0db17352c23"
+    "trace_digest": "sha256:54217e931a7f1fd3fa41d1aae8c1a245293a892589d969135d9fd2b797687d1c"
   },
   "hard_delta_restriction": {
     "case_id": "hard_delta_restriction",
@@ -48,7 +71,18 @@
         "sell": 0
       }
     },
-    "trace_digest": "sha256:eefb8e9421526202f744607d94bd5fdbb8558c66cd539a3dbe8957a8b00f389e"
+    "trace_digest": "sha256:d381af680963ad10898a84d023077286d86264281d8fa34f8ae10591cf690c70"
+  },
+  "long_buy_restriction": {
+    "case_id": "long_buy_restriction",
+    "summary": {
+      "broker_order_sides": [
+        "SELL"
+      ],
+      "restrict_buy": 1,
+      "restrict_sell": 0
+    },
+    "trace_digest": "sha256:518b7691b9fa92d8bcaa7d7951fcd0ea70bfa90f529ea49d768aa4045a72263b"
   },
   "long_short_accumulation": {
     "case_id": "long_short_accumulation",
@@ -56,7 +90,15 @@
       "position": -25,
       "realized": "1000.0"
     },
-    "trace_digest": "sha256:3bbe181ec4abd1b48554c50ca90b3c5ab7cdcd2cbfdcd8177f95dc5e48003f45"
+    "trace_digest": "sha256:d9419efa9d40b76fe3000882bb1fb2fcc4caa8f731f80a0cd44303956f9dff20"
+  },
+  "manual_reprice": {
+    "case_id": "manual_reprice",
+    "summary": {
+      "legacy_price": 95.0,
+      "manually_overridden": true
+    },
+    "trace_digest": "sha256:c35203a95a973d897aa3b8641ff737d04d9ad4b650d36c5e4986c64a9773ae5f"
   },
   "market_close": {
     "case_id": "market_close",
@@ -66,7 +108,7 @@
       "replacement_orders": 0,
       "system_exit": 0
     },
-    "trace_digest": "sha256:29802ee4724d86a058307657dbb795cbb4a70ffcbd6af8a233610d46afe3351a"
+    "trace_digest": "sha256:b064a45c4831515f086d21b2113e95655720f59f7c3600544d0890b7c5111f6c"
   },
   "neutral_cycle": {
     "case_id": "neutral_cycle",
@@ -74,7 +116,7 @@
       "buy": "COMPLETE",
       "sell": "CANCELLED"
     },
-    "trace_digest": "sha256:988331976f20f1a6c59babfad6db7e231368c3a7c554cf1c6b41d1bb2ffb40d5"
+    "trace_digest": "sha256:842254e993c1335fa38ac798934eedf0c757144df19384122f2174d427e9ac2e"
   },
   "partial_fill": {
     "case_id": "partial_fill",
@@ -82,22 +124,41 @@
       "filled": 25,
       "status": "PARTIAL"
     },
-    "trace_digest": "sha256:1a1bc1fd3bee06c27540d119726f8bb6884d7dc73bb1ae6a87c4442f52bc9db0"
+    "trace_digest": "sha256:f77fcc79e6502f85fff1765d781ee43f7759ca273e208fd5e58ebe4bbe4733dd"
+  },
+  "partial_then_reject": {
+    "case_id": "partial_then_reject",
+    "summary": {
+      "filled": 25,
+      "position": 25,
+      "status": "REJECTED"
+    },
+    "trace_digest": "sha256:51f5bc6b0143b2293e73478fcc19963b5896ef0fde21376a08a50c39916975c3"
+  },
+  "read_faults": {
+    "case_id": "read_faults",
+    "summary": {
+      "all_faults_consumed": true,
+      "quote_transport_failed": true,
+      "stale_position_symbol": "STALE"
+    },
+    "trace_digest": "sha256:cafd3d58ba7ae68f592266791170016cc9873eb3c8ec9b4dc21e13528415478a"
   },
   "regular_reject": {
     "case_id": "regular_reject",
     "summary": {
       "status": "REJECTED"
     },
-    "trace_digest": "sha256:d03d89a01901e6f7bca6537c81714115f32205ecf9f22f2341edf270059168db"
+    "trace_digest": "sha256:bcad01963779172f2f6ba2125e1504c94238f3290528b72eced96e7c3731196f"
   },
   "repricing": {
     "case_id": "repricing",
     "summary": {
+      "auto_reprice": false,
       "price": "115",
       "status": "OPEN"
     },
-    "trace_digest": "sha256:4139ddbf5165d988c4024724bb98e5c0695f4685366edb8c99e2ea15c2aa0adc"
+    "trace_digest": "sha256:118f9f4391e31e14ba1da24f935c321e7a876922565d7d0116a307b8248b4593"
   },
   "rest_lag": {
     "case_id": "rest_lag",
@@ -115,25 +176,31 @@
         }
       ],
       "order_id": "1",
+      "polls": [],
       "visible": "OPEN"
     },
-    "trace_digest": "sha256:e728d3e28446cd634952511670f01a4c94a47cbe6ba544704e79e52e6d625c0a"
+    "trace_digest": "sha256:1b0d9f9ad517024fa88b99227b2f316a932f287ce6cc069ff007382c4d9e54de"
   },
   "restart_recovery": {
     "case_id": "restart_recovery",
     "summary": {
       "broker_order_survived": true,
-      "new_listener_connected": true
+      "post_restart_callback_workers": [
+        "restarted"
+      ],
+      "process_state_reset": true,
+      "worker_modules_distinct": true
     },
-    "trace_digest": "sha256:68cc7427479b0f54f9c2a37fa202172c1971903206dcd0d990abf8dba14782a5"
+    "trace_digest": "sha256:83761f2c00cd45b5e35a685bc8b403327602bb24acf71892c387ded8e7f4adbe"
   },
   "sibling_cancellation": {
     "case_id": "sibling_cancellation",
     "summary": {
-      "buy": "COMPLETE",
-      "sell": "CANCELLED"
+      "completed_removed": true,
+      "replacement_count": 1,
+      "sibling_status": "CANCELLED"
     },
-    "trace_digest": "sha256:20640bee62e3bf16bcca17dd8e00a28ef5dbb259c07b3e7c27ff4bff6844b672"
+    "trace_digest": "sha256:ecf89fc2c4ab0210d832068484db0d43c5713d0e9b4b58ea2c48f3bcf2648607"
   },
   "step_delta_velocity_fill_cooldown": {
     "case_id": "step_delta_velocity_fill_cooldown",
@@ -145,7 +212,7 @@
       "step_sell_multiplier": 2.5,
       "velocity_multiplier": 1.5
     },
-    "trace_digest": "sha256:9ba67c6e534ff974148d883498bd7456158c902ecffae441b556c16c803016f2"
+    "trace_digest": "sha256:226589861b6491116375cbf9881328e52c0739dd7e54d7f796934434c5852ff5"
   },
   "two_workers_shared_broker": {
     "case_id": "two_workers_shared_broker",
@@ -154,8 +221,18 @@
         "a",
         "b"
       ],
-      "shared_orders": 1
+      "shared_broker_order": true,
+      "worker_globals_isolated": true,
+      "worker_modules_distinct": true
     },
-    "trace_digest": "sha256:e4125e6a971cc49d2283e23c437162886767377ad9f436f527569129dd6ee490"
+    "trace_digest": "sha256:5190b0db56e6cf83961c738510ee43b71000eb175e81229c3b7cc33559efd25c"
+  },
+  "velocity_down": {
+    "case_id": "velocity_down",
+    "summary": {
+      "buy_multiplier": 1.5,
+      "sell_multiplier": 1.0
+    },
+    "trace_digest": "sha256:7283bebe0f92cb7e8a41cbd0379db9824d9f8a08c66e0478ca78e571e269f7c3"
   }
 }

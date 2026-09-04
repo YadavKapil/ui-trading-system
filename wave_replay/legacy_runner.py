@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import datetime as dt
 import json
 from decimal import Decimal
@@ -17,6 +18,7 @@ from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
 from .faults import FaultScript
 from .market_events import MarketEventFeed
+from .modes import LEGACY_BASELINE_COMMIT
 from .normalize import state_hash
 from .schemas import Contract, ReplayScenario, parse_timestamp
 from .scheduler import DeterministicScheduler
@@ -45,6 +47,12 @@ class LegacyWaveRunner:
 
     def run(self) -> tuple[dict[str, Any], TraceRecorder]:
         contract = self.dataset.contract_for_instrument(self.scenario.instrument_id)
+        from .normalize import sha256_file
+
+        source_hashes = {
+            filename: sha256_file(self.repository_root / filename)
+            for filename in ("common_lib.py", "ticker_single_scraper_new.py")
+        }
         day_bars = self._scenario_bars(contract)
         start = min(bar.bar_start for bar in day_bars)
         trace = TraceRecorder(
@@ -92,11 +100,16 @@ class LegacyWaveRunner:
             module = bootstrap.load_worker("we-1", [instrument_row(contract, self.scenario)])
             module_box["module"] = module
             configure_legacy_module(module, self.scenario, contract)
+            staged_root = Path(module.__file__).parent
+            (staged_root / "delta_limits.json").write_text(
+                json.dumps(self.scenario.wave_settings["delta_limits"], indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            (staged_root / "wave_extractor_config.json").write_text(
+                json.dumps({"NIFTY": self.scenario.wave_settings}, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
             self._install_decision_tracing(module, trace)
-            ticker.on_order_update = module.on_order_update
-            ticker.on_connect = module.on_connect
-            ticker.on_ticks = module.on_ticks
-            ticker.connect()
 
             def on_bar(bar) -> None:
                 key = "underlying" if bar.security_type in {"index", "equity"} else "option"
@@ -152,6 +165,16 @@ class LegacyWaveRunner:
                 actor="we-1",
                 details={
                     "trace_schema_version": TraceRecorder.SCHEMA_VERSION,
+                    "wave_source": {
+                        "baseline_commit": LEGACY_BASELINE_COMMIT,
+                        "source_hashes": source_hashes,
+                        "reachability_hash": state_hash({
+                            "common_lib.py": source_hashes["common_lib.py"],
+                            "ticker_single_scraper_new.py": source_hashes["ticker_single_scraper_new.py"],
+                            "scope": "wave-stage-1-10",
+                        }),
+                        "config_hashes": self.scenario.wave_settings_hashes,
+                    },
                     "dataset": {
                         "schema": self.dataset.manifest.schema,
                         "schema_version": self.dataset.manifest.schema_version,
@@ -200,7 +223,27 @@ class LegacyWaveRunner:
                     actor="we-1",
                     details={"cool_off_mode": "disabled", "production_seconds": 10},
                 )
-                module.place_duo_order(self.scenario.symbol, "NRML", True)
+                assert bootstrap.loader is not None
+                ticker_result = bootstrap.loader.execute_ticker(
+                    "we-1",
+                    module,
+                    argv=[
+                        "ticker_single_scraper_new.py",
+                        str(self.scenario.buy_gap_points),
+                        str(self.scenario.sell_gap_points),
+                        self.scenario.symbol,
+                        f"{self.scenario.lot_size}:{self.scenario.lot_size}",
+                        "access:replay-token",
+                        "NRML",
+                    ],
+                    max_poll_cycles=200,
+                )
+                trace.add(
+                    "TICKER_ENTRYPOINT_COMPLETED",
+                    at=scheduler.now,
+                    actor="we-1",
+                    details=ticker_result,
+                )
 
             scheduler.schedule_at(
                 self.scenario.option_close_at_selection_at,
@@ -208,7 +251,6 @@ class LegacyWaveRunner:
                 priority=20,
                 event_id="wave-startup",
             )
-            self._schedule_polls(scheduler, tasks, module, day_bars, incomplete_at)
             consumed_script = self._schedule_broker_script(
                 scheduler, tasks, engine, ticker, module
             )
@@ -244,6 +286,7 @@ class LegacyWaveRunner:
                 contract,
                 module,
                 unknown_data=unknown_data["value"],
+                source_hashes=source_hashes,
             )
             report["data_quality"]["missing_quote_decisions"] = missing_decisions
             report_path = bootstrap.paths.output / "report.json"
@@ -451,6 +494,7 @@ class LegacyWaveRunner:
         module,
         *,
         unknown_data: bool,
+        source_hashes: dict[str, str],
     ) -> dict[str, Any]:
         latest_option = max(
             (
@@ -476,6 +520,16 @@ class LegacyWaveRunner:
             "scenario_id": self.scenario.scenario_id,
             "scenario_role": self.scenario.role,
             "decision_path": "legacy_decision_path",
+            "wave_source": {
+                "baseline_commit": LEGACY_BASELINE_COMMIT,
+                "source_hashes": source_hashes,
+                "reachability_hash": state_hash({
+                    "common_lib.py": source_hashes["common_lib.py"],
+                    "ticker_single_scraper_new.py": source_hashes["ticker_single_scraper_new.py"],
+                    "scope": "wave-stage-1-10",
+                }),
+                "config_hashes": self.scenario.wave_settings_hashes,
+            },
             "equivalence_status": "ineligible_unknown_data" if unknown_data else "modeled_not_exact",
             "dataset": {
                 "schema": self.dataset.manifest.schema,
@@ -547,6 +601,7 @@ class LegacyWaveRunner:
                     }
                     for event in fill_events
                 ],
+                "fill_events": list(engine.fill_events),
                 "final_restrictions": None if unknown_data else {
                     "buy": module.global_restrict_buy,
                     "sell": module.global_restrict_sell,
@@ -566,9 +621,13 @@ class LegacyWaveRunner:
                 },
             },
             "session_end": {
-                "snapshot_type": "boundary_before_day_order_cancellation",
+                "snapshot_type": (
+                    "boundary_after_market_close_shutdown_poll"
+                    if self.end_at is None
+                    else "boundary_before_day_order_cancellation"
+                ),
                 "day_order_cancellation_modeled": False,
-                "subsequent_shutdown_poll_modeled": False,
+                "subsequent_shutdown_poll_modeled": self.end_at is None,
                 "open_orders_and_positions_are_final_settlement": False,
             },
             "data_quality": {
@@ -586,6 +645,7 @@ class LegacyWaveRunner:
     def _install_decision_tracing(self, module, trace: TraceRecorder) -> None:
         original_place = module.place_duo_order
         original_restrictions = module.check_changes_in_restrictions
+        original_reload = module.reread_option_defaults
 
         def place_duo_order(*args, **kwargs):
             before_state = self._legacy_state(module)
@@ -647,9 +707,28 @@ class LegacyWaveRunner:
         module.place_duo_order = place_duo_order
         module.check_changes_in_restrictions = check_changes_in_restrictions
 
+        def reread_option_defaults(*args, **kwargs):
+            result = original_reload(*args, **kwargs)
+            trace.add(
+                "WAVE_CONFIG_RELOADED",
+                at=module.get_ist_now(),
+                actor="we-1",
+                details={
+                    "config_hashes": self.scenario.wave_settings_hashes,
+                    "effective_delta_limits_hash": state_hash(module.delta_limits_config),
+                    "expected_delta_limits_hash": state_hash(
+                        self.scenario.wave_settings["delta_limits"]
+                    ),
+                },
+            )
+            return result
+
+        module.reread_option_defaults = reread_option_defaults
+
+
     @staticmethod
     def _legacy_state(module) -> dict[str, Any]:
-        return {
+        return copy.deepcopy({
             "orders": module.orders,
             "initial_positions": module.initial_positions,
             "current_positions": module.current_positions,
@@ -659,4 +738,4 @@ class LegacyWaveRunner:
             "same_side_fill_times": module._same_side_fill_times,
             "cooldown_active_until": module._cooldown_active_until,
             "pending_gtt_fallbacks": module.pending_gtt_fallbacks,
-        }
+        })

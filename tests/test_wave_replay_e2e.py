@@ -35,9 +35,9 @@ def test_legacy_decision_path_replay_is_deterministic_and_reports_defaults(tmp_p
     assert report_a["fees"]["zerodha_fee_fidelity"] is False
     assert report_a["account"]["open_gtts"] == []
     assert report_a["session_end"] == {
-        "snapshot_type": "boundary_before_day_order_cancellation",
+        "snapshot_type": "boundary_after_market_close_shutdown_poll",
         "day_order_cancellation_modeled": False,
-        "subsequent_shutdown_poll_modeled": False,
+        "subsequent_shutdown_poll_modeled": True,
         "open_orders_and_positions_are_final_settlement": False,
     }
     assert any(event["kind"] == "COOL_OFF_BYPASSED" for event in trace_a.events)
@@ -47,6 +47,7 @@ def test_legacy_decision_path_replay_is_deterministic_and_reports_defaults(tmp_p
     assert decisions
     assert {"fill_cooldown", "delta_multiplier", "velocity_guard", "multiplier_scale"} <= decisions[0]["details"].keys()
     assert decisions[0]["result"]["multiplier_info"]
+    assert decisions[0]["state_before"] != decisions[0]["state_after"]
     assert all({"schema_version", "input", "result", "state_before", "state_after"} <= event.keys() for event in trace_a.events)
 
 
@@ -194,6 +195,31 @@ def test_poll_schedule_is_anchored_to_delayed_worker_start(tmp_path):
     assert first_poll["at"] == (
         scenario.option_close_at_selection_at + dt.timedelta(seconds=180)
     ).isoformat()
+
+
+def test_staged_ticker_entrypoint_owns_startup_poll_reload_and_cleanup(tmp_path):
+    dataset = ReplayDataset.load(create_synthetic_dataset(tmp_path / "dataset"))
+    scenario = next(item for item in build_scenarios(dataset) if item.role == "range")
+    replay = dict(scenario.replay, end_at="2025-07-07T09:22:00+05:30")
+    scenario = dataclasses.replace(scenario, replay=replay)
+    _report, trace = LegacyWaveRunner(repository_root=".", dataset=dataset, scenario=scenario).run()
+    kinds = [event["kind"] for event in trace.events]
+    assert "WAVE_CONFIG_RELOADED" in kinds
+    reload_event = next(event for event in trace.events if event["kind"] == "WAVE_CONFIG_RELOADED")
+    assert (
+        reload_event["details"]["effective_delta_limits_hash"]
+        == reload_event["details"]["expected_delta_limits_hash"]
+    )
+    completion = next(
+        event for event in trace.events if event["kind"] == "TICKER_ENTRYPOINT_COMPLETED"
+    )
+    assert completion["details"]["poll_sleeps"] >= 1
+    assert completion["details"]["cleanup_handlers"] == 1
+    assert completion["details"]["signal_handlers"]
+    assert any(
+        event["kind"] == "WAVE_DECISION" and event["operation"] == "place_duo_order"
+        for event in trace.events
+    )
 
 
 def test_timed_failure_activates_at_declared_scheduler_time(tmp_path):
