@@ -37,3 +37,26 @@ POST /api/start  {symbol, buy_gap, sell_gap, buy_quantity, sell_quantity}
 If a duo order fails (circuit limit / margin), a GTT is placed as
 fallback. When it fires, the new order id is linked back to the strategy's
 order state via tag echo.
+
+## Historical replay
+
+The `wave_replay` package provides a hermetic, deterministic consumer for
+portable `wave-replay-dataset-v1` exports. Initial historical runs accept
+synchronized one-minute NIFTY underlying and option data only and use the
+approved modeled profile: one frozen ATM CE contract, one date-effective lot,
+10% BUY/SELL gaps, flat INR 1,000,000 starting cash, regular orders,
+placement cool-off disabled, same-side fill cooldown enabled, completed-close
+triggers, subsequent-bar activation, limit fills, and an explicitly labeled
+Upstox fee approximation.
+
+```powershell
+python -m wave_replay create-synthetic --output data\wave-replay\synthetic-v1
+python -m wave_replay validate-dataset --dataset data\wave-replay\synthetic-v1
+python -m wave_replay select-corpus --dataset data\wave-replay\synthetic-v1 --output wave_replay_output\scenarios
+python -m wave_replay replay --dataset data\wave-replay\synthetic-v1 --scenario wave_replay_output\scenarios\nifty-range-atm-ce.json --output wave_replay_output\range --repeat 2
+```
+
+The bootstrap stages Wave source and fake credentials in a temporary sandbox,
+denies outbound network access, substitutes fake broker/ticker modules before
+import, and runs callbacks/threads through the cooperative scheduler. Generated
+datasets and traces are gitignored.

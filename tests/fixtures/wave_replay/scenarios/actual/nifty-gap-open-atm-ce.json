@@ -1,0 +1,204 @@
+{
+  "broker_script": null,
+  "config": {
+    "hashes": {
+      "delta_limits": "sha256:bd5b152b7153c308666e42d604b1b322d13eff6c06efdc3c3954c86b25262f47",
+      "resolved_wave_settings": "sha256:537b23327cc9621f8178091bdd1f0599b29ffc60e6399b4d55cf5916e6f68665",
+      "wave_extractor_config": "sha256:4ee17395cde1ee2be625f9a3e25245fcd14317d7e45ce8ba60daf72b10179a92"
+    },
+    "resolved_wave_settings": {
+      "delta_limits": {
+        "NIFTY": {
+          "default": {
+            "max": 3500,
+            "min": -3500
+          }
+        }
+      },
+      "delta_multiplier": {
+        "hard_limit": 2000,
+        "max_multiplier": 3.0,
+        "soft_limit": 500
+      },
+      "fill_cooldown": {
+        "cooldown_duration_minutes": 15,
+        "enabled": true,
+        "trigger_count": 2,
+        "window_minutes": 10
+      },
+      "multiplier_scale": {
+        "-1": [
+          1,
+          1.3
+        ],
+        "-10": [
+          1,
+          15
+        ],
+        "-2": [
+          1,
+          1.7
+        ],
+        "-3": [
+          1,
+          2.5
+        ],
+        "-4": [
+          1,
+          3
+        ],
+        "-5": [
+          1,
+          10
+        ],
+        "-6": [
+          1,
+          10
+        ],
+        "-7": [
+          1,
+          10
+        ],
+        "-8": [
+          1,
+          15
+        ],
+        "-9": [
+          1,
+          15
+        ],
+        "0": [
+          1,
+          1
+        ],
+        "1": [
+          1.3,
+          1
+        ],
+        "10": [
+          15,
+          1
+        ],
+        "2": [
+          1.7,
+          1
+        ],
+        "3": [
+          2.5,
+          1
+        ],
+        "4": [
+          3,
+          1
+        ],
+        "5": [
+          10,
+          1
+        ],
+        "6": [
+          10,
+          1
+        ],
+        "7": [
+          10,
+          1
+        ],
+        "8": [
+          15,
+          1
+        ],
+        "9": [
+          15,
+          1
+        ]
+      },
+      "velocity_guard": {
+        "gap_multiplier": 1.5,
+        "threshold_pct": 0.8,
+        "window_minutes": 15
+      }
+    }
+  },
+  "initial": {
+    "cash": {
+      "amount": "1000000",
+      "currency": "INR"
+    },
+    "gtts": [],
+    "positions": [],
+    "regular_orders": []
+  },
+  "market_dataset": {
+    "dataset_id": "wave-v1-94a8f1c3ec1ac1c75589",
+    "date": "2026-04-08",
+    "manifest_sha256": "88d7bde6544fbb24b030ca539715e8aeff09f43f43798bdf8d8206d8b5866e5f",
+    "missing_quote_policy": "fail",
+    "schema": "wave-replay-dataset-v1"
+  },
+  "replay": {
+    "activation_policy": "subsequent_bar",
+    "broker_fee_model": "upstox_approximation",
+    "buy_gap_pct": 0.1,
+    "cool_off_mode": "disabled",
+    "equivalence_status": "modeled_not_exact",
+    "fee_schedule_sha256": "f18efb314d04fd7c33d2df78eca26f2f15111aa33ddf953b51426bb0ce36f8fb",
+    "fill_price_mode": "limit",
+    "lots": 1,
+    "market_resolution": "1minute",
+    "max_calendar_dte": 20,
+    "min_calendar_dte": 5,
+    "option_right": "call",
+    "order_mode": "regular",
+    "sell_gap_pct": 0.1,
+    "starting_cash_inr": 1000000,
+    "trigger_mode": "close_only",
+    "underlying": "NIFTY"
+  },
+  "scenario_id": "nifty-gap-open-atm-ce",
+  "scenario_role": "gap_open",
+  "schema_version": 1,
+  "seed": 104729,
+  "selection": {
+    "calendar_dte": 5,
+    "contract_metadata_sha256": "aefd605a0e10ea2581a3e80763cccae9522128e32ff926164e4cc287191c3bd1",
+    "expiry": "2026-04-13",
+    "first_completed_underlying_close": "23844.7000",
+    "first_completed_underlying_close_at": "2026-04-08T09:16:00+05:30",
+    "instrument_id": "NIFTY|2026-04-13|C|23850",
+    "instrument_token_kind": "synthetic_replay",
+    "lean_symbol": "NIFTY 260413C23850000",
+    "option_close_at_selection_at": "2026-04-08T09:16:00+05:30",
+    "replay_instrument_token": 915177595784153846,
+    "right": "call",
+    "selected_date": "2026-04-08",
+    "source_instrument_id": "NSE_FO|54806|13-04-2026",
+    "strike": "23850.0000",
+    "symbol": "NIFTY2641323850CE"
+  },
+  "visibility": {
+    "callback_priority": 30,
+    "callback_seconds": 0.0,
+    "order_history_priority": 40,
+    "order_history_seconds": 0.0,
+    "orders_priority": 41,
+    "orders_seconds": 0.0,
+    "positions_priority": 42,
+    "positions_seconds": 0.0
+  },
+  "workers": [
+    {
+      "buy_gap_pct": 0.1,
+      "buy_gap_points": "25.2",
+      "buy_quantity": 65,
+      "instance_id": "we-1",
+      "lot_size": 65,
+      "lots": 1,
+      "option_close_at_selection": "252.4000",
+      "order_mode": "regular",
+      "sell_gap_pct": 0.1,
+      "sell_gap_points": "25.2",
+      "sell_quantity": 65,
+      "symbol": "NIFTY2641323850CE"
+    }
+  ]
+}

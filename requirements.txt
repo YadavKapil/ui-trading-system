@@ -11,6 +11,9 @@ numpy==2.2.6
 pandas==2.3.3
 pandas_ta==0.4.71b0; python_version>="3.12"          # expiry-trade Stochastic RSI (optional; skipped below 3.12)
 scipy==1.16.3
+pyarrow==21.0.0
+greenlet==3.2.4
+PyYAML==6.0.2
 
 requests==2.32.5
 python-dateutil==2.9.0.post0

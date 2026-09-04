@@ -1,0 +1,210 @@
+"""Command-line interface for validation, selection, replay, and goldens."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import socket
+import sys
+import tempfile
+from pathlib import Path
+
+from .bootstrap import ReplayBootstrap
+from .broker_engine import BrokerEngine
+from .clock import SimClock
+from .compare import approve_golden, compare_jsonl
+from .coverage_manifest import function_inventory
+from .datasets import ReplayDataset
+from .fake_kite import FakeKite
+from .fake_ticker import FakeTicker
+from .legacy_runner import LegacyWaveRunner
+from .network_guard import UnexpectedNetworkAccess
+from .schemas import IST, ReplayScenario
+from .scheduler import DeterministicScheduler
+from .selector import build_scenarios, load_saved_wave_settings
+from .synthetic import create_synthetic_dataset
+from .tasks import SimTaskRuntime
+from .tracing import TraceRecorder
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="wave-replay")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    synthetic = subparsers.add_parser("create-synthetic", help="create compact schema-v1 fixtures")
+    synthetic.add_argument("--output", required=True)
+
+    validate = subparsers.add_parser("validate-dataset")
+    validate.add_argument("--dataset", required=True)
+    validate.add_argument("--report")
+
+    select = subparsers.add_parser("select-corpus")
+    select.add_argument("--dataset", required=True)
+    select.add_argument("--output", required=True)
+    select.add_argument("--wave-config", default="wave_extractor_config.json")
+    select.add_argument("--delta-limits", default="delta_limits.json")
+
+    replay = subparsers.add_parser("replay")
+    replay.add_argument("--dataset", required=True)
+    replay.add_argument("--scenario", required=True)
+    replay.add_argument("--repository-root", default=".")
+    replay.add_argument("--output", required=True)
+    replay.add_argument("--repeat", type=int, default=1)
+
+    compare = subparsers.add_parser("compare")
+    compare.add_argument("--expected", required=True)
+    compare.add_argument("--actual", required=True)
+
+    approve = subparsers.add_parser("approve-golden")
+    approve.add_argument("--actual", required=True)
+    approve.add_argument("--golden", required=True)
+    approve.add_argument("--yes", action="store_true")
+
+    coverage = subparsers.add_parser("coverage-manifest")
+    coverage.add_argument("--source", default="common_lib.py")
+    coverage.add_argument("--output", required=True)
+
+    boundary = subparsers.add_parser("boundary-probe", help=argparse.SUPPRESS)
+    boundary.add_argument("--repository-root", default=".")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "create-synthetic":
+        path = create_synthetic_dataset(args.output)
+        print(json.dumps({"dataset": str(path.resolve())}, sort_keys=True))
+        return 0
+    if args.command == "validate-dataset":
+        dataset = ReplayDataset.load(args.dataset)
+        report = dataset.validation_report
+        if args.report:
+            report.write(args.report)
+        print(json.dumps(report.to_mapping(), indent=2, sort_keys=True))
+        return 0 if report.valid else 2
+    if args.command == "select-corpus":
+        dataset = ReplayDataset.load(args.dataset)
+        output = Path(args.output)
+        output.mkdir(parents=True, exist_ok=True)
+        settings, hashes = load_saved_wave_settings(
+            args.wave_config,
+            delta_limits_path=args.delta_limits,
+        )
+        scenarios = build_scenarios(dataset, wave_settings=settings, wave_settings_hashes=hashes)
+        for scenario in scenarios:
+            (output / f"{scenario.scenario_id}.json").write_text(
+                json.dumps(scenario.to_mapping(), indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        print(json.dumps({"scenarios": [scenario.scenario_id for scenario in scenarios]}, sort_keys=True))
+        return 0
+    if args.command == "replay":
+        return _run_replay(args)
+    if args.command == "compare":
+        difference = compare_jsonl(args.expected, args.actual)
+        print(json.dumps(difference.__dict__, indent=2, sort_keys=True))
+        return 0 if difference.equal else 1
+    if args.command == "approve-golden":
+        approve_golden(args.actual, args.golden, explicit=args.yes)
+        print(json.dumps({"golden": str(Path(args.golden).resolve())}, sort_keys=True))
+        return 0
+    if args.command == "coverage-manifest":
+        Path(args.output).write_text(
+            json.dumps(function_inventory(args.source), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return 0
+    if args.command == "boundary-probe":
+        print(json.dumps(_boundary_probe(Path(args.repository_root).resolve()), sort_keys=True))
+        return 0
+    raise AssertionError(args.command)
+
+
+def _run_replay(args) -> int:
+    dataset = ReplayDataset.load(args.dataset)
+    scenario = ReplayScenario.load(args.scenario)
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    digests: list[str] = []
+    final_report = None
+    for index in range(args.repeat):
+        runner = LegacyWaveRunner(
+            repository_root=args.repository_root,
+            dataset=dataset,
+            scenario=scenario,
+        )
+        report, trace = runner.run()
+        trace_path = output / (f"trace-{index + 1}.jsonl" if args.repeat > 1 else "trace.jsonl")
+        trace.write_jsonl(trace_path)
+        digests.append(trace.digest())
+        final_report = report
+    if len(set(digests)) != 1:
+        raise RuntimeError(f"Non-deterministic traces: {digests}")
+    assert final_report is not None
+    final_report["determinism"] = {"repetitions": args.repeat, "trace_digest": digests[0]}
+    (output / "report.json").write_text(
+        json.dumps(final_report, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(json.dumps({"report": str((output / "report.json").resolve()), "trace_digest": digests[0]}, sort_keys=True))
+    return 0
+
+
+def _boundary_probe(repository_root: Path) -> dict:
+    start = dt.datetime(2025, 1, 6, 9, 15, tzinfo=IST)
+    trace = TraceRecorder()
+    scheduler = DeterministicScheduler(start=start, trace=trace)
+    tasks = SimTaskRuntime(scheduler, trace)
+    clock = SimClock(scheduler)
+    clock.bind_task_runtime(tasks)
+    engine = BrokerEngine(scheduler=scheduler, trace=trace)
+    kite = FakeKite(engine)
+    ticker = FakeTicker(scheduler, tasks, trace)
+    checks = {}
+    with ReplayBootstrap(
+        repository_root=repository_root,
+        scheduler=scheduler,
+        tasks=tasks,
+        clock=clock,
+        fake_kite=kite,
+        fake_ticker=ticker,
+        trace=trace,
+        strict_thread_inventory=True,
+    ) as bootstrap:
+        first = bootstrap.load_worker("boundary-one", [])
+        second = bootstrap.load_worker("boundary-two", [])
+        imported_from_sandbox = str(first.__file__).startswith(str(bootstrap.paths.root))
+        first.orders["isolation"] = {}
+        checks["globals_isolated"] = second.orders == {}
+        checks["broker_is_fake"] = first.kite is kite and second.kite is kite
+        checks["database_files"] = sorted(path.name for path in bootstrap.paths.databases.glob("*.db"))
+        first.symbol = "BOUNDARYCE"
+        status_path = bootstrap.paths.status / f"status_BOUNDARYCE_{os.getpid()}.json"
+        status_path.write_text("{}", encoding="utf-8")
+        first.delete_own_status_file()
+        checks["atexit_cleanup_semantics"] = not status_path.exists()
+        ticker_source = (bootstrap.paths.source / "ticker_single_scraper_new.py").read_text(encoding="utf-8")
+        checks["signal_handler_present"] = "signal.signal(signal.SIGTERM" in ticker_source
+        checks["atexit_handler_present"] = "atexit.register(delete_own_status_file)" in ticker_source
+        try:
+            socket.getaddrinfo("denied.invalid", 443)
+        except UnexpectedNetworkAccess:
+            checks["network_denied"] = True
+        else:
+            checks["network_denied"] = False
+        bootstrap.loader.unload_all()
+        restarted = bootstrap.load_worker("boundary-restart", [])
+        checks["restart_globals_clean"] = restarted.orders == {}
+        checks["filesystem_ledger_entries"] = len(bootstrap.filesystem_guard.ledger)
+    return {
+        "lane": "non_golden_subprocess_boundary",
+        "imported_from_sandbox": imported_from_sandbox,
+        "checks": checks,
+        "trace_digest": trace.digest(),
+    }
+
+
+if __name__ == "__main__":
+    sys.exit(main())

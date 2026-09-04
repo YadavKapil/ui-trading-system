@@ -26,6 +26,9 @@ dependencies = [
     "requests>=2.31",
     "python-dateutil>=2.9",
     "kiteconnect>=5.0",
+    "greenlet>=3.1",
+    "pyarrow>=18.0",
+    "PyYAML>=6.0",
 ]
 
 [project.urls]
@@ -52,4 +55,4 @@ py-modules = [
     "trade_journal_db",
     "tradebook_analyzer",
 ]
-packages = ["mibian"]
+packages = ["mibian", "wave_replay"]

@@ -16,6 +16,11 @@ instruments.db*
 trade_journal.db*
 api_monitor.db*
 
+# Wave replay exports and generated traces
+data/wave-replay/
+wave_replay_output/
+*.wave-trace.jsonl
+
 # logs & order state
 *.log
 logs/
