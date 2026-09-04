@@ -55,8 +55,9 @@ def test_synthetic_v1_validates_exact_corpus_and_lot_sizes(replay_dataset):
         "validation_report.json",
     }
     assert replay_dataset.manifest.data_contract["replay_token_origin"] == "sha256(instrument_id)[:15]"
-    assert replay_dataset.manifest.producer["implementation_commit"] == "ef3a590"
-    assert replay_dataset.manifest.source["data_source_commit"] == "d667bcb"
+    assert replay_dataset.manifest.producer["implementation_commit"] == "0639cab"
+    assert replay_dataset.manifest.source["config"]["repository_commit"] == "d667bcb"
+    assert replay_dataset.validation_report.missingness["option_session_outages"] == 0
 
     scenarios = {scenario.role: scenario for scenario in build_scenarios(replay_dataset)}
     assert {
@@ -261,3 +262,74 @@ def test_bar_session_date_and_expected_slots_are_reconciled(tmp_path):
     _refresh_manifest_file(root, "sessions.parquet")
     report = ReplayDataset.load(root, validate=False).validation_report
     assert any("expected_bar_count does not match duration" in error for error in report.errors)
+
+
+def test_manifest_scope_grid_and_source_preferred_lot_are_cross_bound(tmp_path):
+    root = create_synthetic_dataset(tmp_path / "dataset-grid")
+    path = root / "option_bars.parquet"
+    rows = pq.read_table(path).to_pylist()
+    for field in (
+        "bar_start_utc",
+        "bar_end_utc",
+        "available_at_utc",
+        "bar_start_ist",
+        "bar_end_ist",
+        "available_at_ist",
+    ):
+        rows[0][field] += dt.timedelta(seconds=30)
+    pq.write_table(pa.Table.from_pylist(rows, schema=BAR_ARROW_SCHEMA), path)
+    _refresh_manifest_file(root, "option_bars.parquet")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("session grid" in error for error in report.errors)
+
+    root = create_synthetic_dataset(tmp_path / "dataset-lot")
+    path = root / "contracts.parquet"
+    contracts = pq.read_table(path).to_pylist()
+    contracts[0]["lot_size"] = contracts[0]["resolved_contract_multiplier"]
+    assert contracts[0]["lot_size"] != contracts[0]["source_contract_multiplier"]
+    pq.write_table(pa.Table.from_pylist(contracts, schema=CONTRACT_ARROW_SCHEMA), path)
+    _refresh_manifest_file(root, "contracts.parquet")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("Source-preferred lot_size policy" in error for error in report.errors)
+
+    root = create_synthetic_dataset(tmp_path / "dataset-scope")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["request"]["underlying"] = "BANKNIFTY"
+    manifest_without_hash = dict(manifest)
+    manifest_without_hash.pop("manifest_sha256")
+    from wave_replay.normalize import canonical_json, sha256_bytes
+
+    manifest["manifest_sha256"] = sha256_bytes((canonical_json(manifest_without_hash) + "\n").encode())
+    manifest_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("underlying" in error for error in report.errors)
+
+
+def test_partition_session_and_contract_lifecycle_semantics_are_bound(tmp_path):
+    root = create_synthetic_dataset(tmp_path / "dataset-partition")
+    path = root / "underlying_bars.parquet"
+    rows = pq.read_table(path).to_pylist()
+    rows[0]["security_type"] = "indexoption"
+    pq.write_table(pa.Table.from_pylist(rows, schema=BAR_ARROW_SCHEMA), path)
+    _refresh_manifest_file(root, "underlying_bars.parquet")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("Underlying partition" in error for error in report.errors)
+
+    root = create_synthetic_dataset(tmp_path / "dataset-session-duplicate")
+    path = root / "sessions.parquet"
+    rows = pq.read_table(path).to_pylist()
+    rows.append(dict(rows[0]))
+    pq.write_table(pa.Table.from_pylist(rows, schema=SESSION_ARROW_SCHEMA), path)
+    _refresh_manifest_file(root, "sessions.parquet")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("Duplicate session_date" in error for error in report.errors)
+
+    root = create_synthetic_dataset(tmp_path / "dataset-lifecycle")
+    path = root / "contracts.parquet"
+    rows = pq.read_table(path).to_pylist()
+    rows[0]["first_available_at_utc"] += dt.timedelta(minutes=1)
+    pq.write_table(pa.Table.from_pylist(rows, schema=CONTRACT_ARROW_SCHEMA), path)
+    _refresh_manifest_file(root, "contracts.parquet")
+    report = ReplayDataset.load(root, validate=False).validation_report
+    assert any("availability bounds" in error for error in report.errors)

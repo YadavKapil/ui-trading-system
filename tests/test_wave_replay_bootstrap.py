@@ -260,8 +260,41 @@ def test_worker_import_restores_root_logging_and_failed_module_is_removed():
         trace=trace,
     ) as bootstrap:
         bootstrap.load_worker("logging", [])
-        assert (list(root.handlers), list(root.filters), root.level, root.disabled, root.propagate) == before
+        assert not any(handler in root.handlers for handler in before[0])
+        assert len(root.handlers) == 1
+        assert str(bootstrap.paths.logs) in root.handlers[0].baseFilename
         (bootstrap.paths.source / "common_lib.py").write_text("raise RuntimeError('broken import')", encoding="utf-8")
         with pytest.raises(RuntimeError, match="broken import"):
             bootstrap.load_worker("broken", [])
         assert "_wave_replay_workers.broken.common_lib" not in sys.modules
+    assert (list(root.handlers), list(root.filters), root.level, root.disabled, root.propagate) == before
+
+
+def test_preopened_host_file_handler_is_detached_for_full_replay_context(tmp_path):
+    external = tmp_path / "host.log"
+    handler = logging.FileHandler(external, encoding="utf-8")
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.warning("before")
+    handler.flush()
+    before = external.read_text(encoding="utf-8")
+    trace, scheduler, tasks, clock, kite, ticker = _components()
+    try:
+        with ReplayBootstrap(
+            repository_root=".",
+            scheduler=scheduler,
+            tasks=tasks,
+            clock=clock,
+            fake_kite=kite,
+            fake_ticker=ticker,
+            trace=trace,
+        ) as bootstrap:
+            bootstrap.load_worker("logging-isolation", [])
+            root.error("must stay inside replay sandbox")
+            assert handler not in root.handlers
+        handler.flush()
+        assert external.read_text(encoding="utf-8") == before
+        assert handler in root.handlers
+    finally:
+        root.removeHandler(handler)
+        handler.close()

@@ -34,6 +34,12 @@ def test_legacy_decision_path_replay_is_deterministic_and_reports_defaults(tmp_p
     assert report_a["fees"]["broker_fee_model"] == "upstox_approximation"
     assert report_a["fees"]["zerodha_fee_fidelity"] is False
     assert report_a["account"]["open_gtts"] == []
+    assert report_a["session_end"] == {
+        "snapshot_type": "boundary_before_day_order_cancellation",
+        "day_order_cancellation_modeled": False,
+        "subsequent_shutdown_poll_modeled": False,
+        "open_orders_and_positions_are_final_settlement": False,
+    }
     assert any(event["kind"] == "COOL_OFF_BYPASSED" for event in trace_a.events)
     header = next(event for event in trace_a.events if event["kind"] == "TRACE_HEADER")
     assert header["details"]["contract"]["lot_size"] == 75

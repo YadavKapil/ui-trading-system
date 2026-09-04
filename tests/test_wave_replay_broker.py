@@ -189,6 +189,7 @@ def test_visibility_offsets_delay_callbacks_history_orders_and_positions():
     ticker = FakeTicker(scheduler, tasks, trace)
     updates = []
     ticker.on_order_update = lambda _ws, data: updates.append(data["status"])
+    ticker.connect()
     engine.bind_callback_dispatch(ticker.order_dispatch)
     order_id = kite.place_order(
         variety="regular",
@@ -263,6 +264,7 @@ def test_default_callback_precedes_rest_order_and_position_visibility():
             observed["positions"] = kite.positions()["net"]
 
     ticker.on_order_update = callback
+    ticker.connect()
     engine.bind_callback_dispatch(ticker.order_dispatch)
     engine.set_quote("NFO:NIFTYCE", last_price=Decimal("100"), instrument_token=123)
     order_id = kite.place_order(
@@ -322,6 +324,7 @@ def test_callback_mutation_cannot_change_rest_history_and_terminal_orders_stay_t
         data["price"] = -1
 
     ticker.on_order_update = callback
+    ticker.connect()
     engine.bind_callback_dispatch(ticker.order_dispatch)
     order_id = kite.place_order(
         variety="regular",
@@ -433,3 +436,55 @@ def test_positions_mark_to_market_on_each_completed_option_bar():
     position = kite.positions()["net"][0]
     assert position["last_price"] == 100.0
     assert position["m2m"] == 250.0
+
+
+def test_limit_fill_keeps_completed_close_as_current_market_mark():
+    _trace, scheduler, _tasks, engine, kite = _broker()
+    order_id = kite.place_order(
+        variety="regular",
+        exchange="NFO",
+        tradingsymbol="NIFTYCE",
+        transaction_type="BUY",
+        quantity=25,
+        product="NRML",
+        order_type="LIMIT",
+        price=90,
+        tag="B",
+    )
+    scheduler.run()
+    scheduler.now += dt.timedelta(minutes=1)
+    template = MarketBar(
+        instrument_id="id",
+        source_instrument_id="source",
+        replay_instrument_token=123,
+        wave_trading_symbol="NIFTYCE",
+        lean_symbol="lean",
+        underlying="NIFTY",
+        security_type="indexoption",
+        market="india",
+        exchange="NFO",
+        session_date=scheduler.now.date(),
+        bar_start=scheduler.now - dt.timedelta(minutes=1),
+        bar_end=scheduler.now,
+        available_at=scheduler.now,
+        resolution_seconds=60,
+        open=Decimal("85"),
+        high=Decimal("86"),
+        low=Decimal("79"),
+        close=Decimal("80"),
+        volume=100,
+        open_interest=1000,
+        source_archive_sha256="hash",
+        source_archive="archive",
+        source_member="member",
+        source_member_sha256="member-hash",
+        source_row=3,
+        source_universe_sha256="universe-hash",
+    )
+    engine.evaluate_close_bar(template)
+    scheduler.run()
+    order = engine.orders_by_id[order_id]
+    position = kite.positions()["net"][0]
+    assert order.average_price == Decimal("90")
+    assert position["last_price"] == 80.0
+    assert position["m2m"] == -250.0

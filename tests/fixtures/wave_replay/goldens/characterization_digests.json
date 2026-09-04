@@ -1,0 +1,161 @@
+{
+  "callback_poll_race": {
+    "case_id": "callback_poll_race",
+    "summary": {
+      "callbacks": [
+        {
+          "callback": "ACK",
+          "history": [],
+          "orders": []
+        },
+        {
+          "callback": "OPEN",
+          "history": [],
+          "orders": []
+        }
+      ],
+      "order_id": "1",
+      "visible": "OPEN"
+    },
+    "trace_digest": "sha256:453cb2d1ce8ce5bf17a7ba46ba54630ded4c141be64189ff099a59475b4211a7"
+  },
+  "cancel_failure": {
+    "case_id": "cancel_failure",
+    "summary": {
+      "failure_consumed": true,
+      "status": "OPEN"
+    },
+    "trace_digest": "sha256:c47d63ba6ae2b348c70ca8e014fbcb0cad2aea03eddd29bd1735160b55bd7083"
+  },
+  "gtt_fallback_trigger_delete_race": {
+    "case_id": "gtt_fallback_trigger_delete_race",
+    "summary": {
+      "child_survived": true,
+      "child_tag": "GTT_B",
+      "trigger_after_delete_race": "deleted"
+    },
+    "trace_digest": "sha256:ca6b6fd47ab8ad7d998cb5dcb3b95bd04ced5d61b26032eea7e2e0db17352c23"
+  },
+  "hard_delta_restriction": {
+    "case_id": "hard_delta_restriction",
+    "summary": {
+      "negative": {
+        "buy": 0,
+        "sell": 1
+      },
+      "positive": {
+        "buy": 1,
+        "sell": 0
+      }
+    },
+    "trace_digest": "sha256:eefb8e9421526202f744607d94bd5fdbb8558c66cd539a3dbe8957a8b00f389e"
+  },
+  "long_short_accumulation": {
+    "case_id": "long_short_accumulation",
+    "summary": {
+      "position": -25,
+      "realized": "1000.0"
+    },
+    "trace_digest": "sha256:3bbe181ec4abd1b48554c50ca90b3c5ab7cdcd2cbfdcd8177f95dc5e48003f45"
+  },
+  "market_close": {
+    "case_id": "market_close",
+    "summary": {
+      "boundary_only": true,
+      "market_open_1531": false,
+      "replacement_orders": 0,
+      "system_exit": 0
+    },
+    "trace_digest": "sha256:29802ee4724d86a058307657dbb795cbb4a70ffcbd6af8a233610d46afe3351a"
+  },
+  "neutral_cycle": {
+    "case_id": "neutral_cycle",
+    "summary": {
+      "buy": "COMPLETE",
+      "sell": "CANCELLED"
+    },
+    "trace_digest": "sha256:988331976f20f1a6c59babfad6db7e231368c3a7c554cf1c6b41d1bb2ffb40d5"
+  },
+  "partial_fill": {
+    "case_id": "partial_fill",
+    "summary": {
+      "filled": 25,
+      "status": "PARTIAL"
+    },
+    "trace_digest": "sha256:1a1bc1fd3bee06c27540d119726f8bb6884d7dc73bb1ae6a87c4442f52bc9db0"
+  },
+  "regular_reject": {
+    "case_id": "regular_reject",
+    "summary": {
+      "status": "REJECTED"
+    },
+    "trace_digest": "sha256:d03d89a01901e6f7bca6537c81714115f32205ecf9f22f2341edf270059168db"
+  },
+  "repricing": {
+    "case_id": "repricing",
+    "summary": {
+      "price": "115",
+      "status": "OPEN"
+    },
+    "trace_digest": "sha256:4139ddbf5165d988c4024724bb98e5c0695f4685366edb8c99e2ea15c2aa0adc"
+  },
+  "rest_lag": {
+    "case_id": "rest_lag",
+    "summary": {
+      "callbacks": [
+        {
+          "callback": "ACK",
+          "history": [],
+          "orders": []
+        },
+        {
+          "callback": "OPEN",
+          "history": [],
+          "orders": []
+        }
+      ],
+      "order_id": "1",
+      "visible": "OPEN"
+    },
+    "trace_digest": "sha256:e728d3e28446cd634952511670f01a4c94a47cbe6ba544704e79e52e6d625c0a"
+  },
+  "restart_recovery": {
+    "case_id": "restart_recovery",
+    "summary": {
+      "broker_order_survived": true,
+      "new_listener_connected": true
+    },
+    "trace_digest": "sha256:68cc7427479b0f54f9c2a37fa202172c1971903206dcd0d990abf8dba14782a5"
+  },
+  "sibling_cancellation": {
+    "case_id": "sibling_cancellation",
+    "summary": {
+      "buy": "COMPLETE",
+      "sell": "CANCELLED"
+    },
+    "trace_digest": "sha256:20640bee62e3bf16bcca17dd8e00a28ef5dbb259c07b3e7c27ff4bff6844b672"
+  },
+  "step_delta_velocity_fill_cooldown": {
+    "case_id": "step_delta_velocity_fill_cooldown",
+    "summary": {
+      "delta_multiplier": 3.0,
+      "fill_cooldown_activated": true,
+      "sell_suppressed": true,
+      "step": "-3",
+      "step_sell_multiplier": 2.5,
+      "velocity_multiplier": 1.5
+    },
+    "trace_digest": "sha256:9ba67c6e534ff974148d883498bd7456158c902ecffae441b556c16c803016f2"
+  },
+  "two_workers_shared_broker": {
+    "case_id": "two_workers_shared_broker",
+    "summary": {
+      "listeners": [
+        "a",
+        "b"
+      ],
+      "shared_orders": 1
+    },
+    "trace_digest": "sha256:e4125e6a971cc49d2283e23c437162886767377ad9f436f527569129dd6ee490"
+  }
+}

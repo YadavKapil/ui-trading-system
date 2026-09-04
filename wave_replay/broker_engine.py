@@ -290,6 +290,8 @@ class BrokerEngine:
             if decision.touched and decision.fill_price is not None:
                 self._apply_fill(order, quantity=order.remaining, price=decision.fill_price, complete=True)
                 filled.append(order.order_id)
+        if filled:
+            self._mark_to_market(bar.symbol, bar.close)
         return filled
 
     def place_gtt(self, **request: Any) -> dict[str, int]:

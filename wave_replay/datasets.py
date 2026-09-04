@@ -71,12 +71,23 @@ class ReplayDataset:
                 self.contracts_by_wave_symbol[contract.wave_trading_symbol].append(contract)
 
     @classmethod
-    def load(cls, root: str | Path, *, validate: bool = True) -> "ReplayDataset":
+    def load(
+        cls,
+        root: str | Path,
+        *,
+        validate: bool = True,
+        allow_legacy_provenance: bool = False,
+    ) -> "ReplayDataset":
         root = Path(root).resolve()
         manifest_path = root / "manifest.json"
         manifest = DatasetManifest.load(root)
         report = ValidationReport(dataset_id=manifest.dataset_id)
-        _validate_inventory(root, manifest, report)
+        _validate_inventory(
+            root,
+            manifest,
+            report,
+            allow_legacy_provenance=allow_legacy_provenance,
+        )
 
         tables: dict[str, list[dict[str, Any]]] = {}
         for key, filename in PARQUET_PARTITIONS.items():
@@ -246,7 +257,13 @@ def resolve_missing_quote(policy: str, *, instrument_id: str, timestamp: str) ->
     raise SchemaError(f"Unknown missing_quote_policy {policy!r}")
 
 
-def _validate_inventory(root: Path, manifest: DatasetManifest, report: ValidationReport) -> None:
+def _validate_inventory(
+    root: Path,
+    manifest: DatasetManifest,
+    report: ValidationReport,
+    *,
+    allow_legacy_provenance: bool,
+) -> None:
     declared = set(manifest.declared_files)
     if declared != DECLARED_FILES:
         report.error(f"declared_files must equal {sorted(DECLARED_FILES)}, got {sorted(declared)}")
@@ -275,20 +292,62 @@ def _validate_inventory(root: Path, manifest: DatasetManifest, report: Validatio
     for key, expected in required_contract.items():
         if manifest.data_contract.get(key) != expected:
             report.error(f"Manifest data_contract {key} must be {expected!r}")
+    cross_bound = {
+        "underlying": (
+            manifest.request.get("underlying"),
+            manifest.identity.get("underlying"),
+        ),
+        "start_date": (
+            manifest.request.get("start_date"),
+            manifest.identity.get("start_date"),
+        ),
+        "end_date": (
+            manifest.request.get("end_date"),
+            manifest.identity.get("end_date"),
+        ),
+        "resolution_seconds": (
+            manifest.data_contract.get("resolution_seconds"),
+            manifest.identity.get("resolution_seconds"),
+        ),
+    }
+    for name, values in cross_bound.items():
+        if values[0] != values[1]:
+            report.error(f"Manifest request/identity/data_contract mismatch for {name}")
+    if manifest.identity.get("market") != "india" or manifest.request.get("underlying") != "NIFTY":
+        report.error("Initial consumer requires manifest market=india and underlying=NIFTY")
     implementation_commit = manifest.producer.get("implementation_commit")
-    data_source_commit = manifest.source.get("data_source_commit")
+    legacy_data_source_commit = manifest.source.get("data_source_commit")
     if (
         not implementation_commit
         or manifest.producer.get("commit") != implementation_commit
         or manifest.identity.get("implementation_commit") != implementation_commit
     ):
         report.error("Producer implementation_commit provenance is inconsistent")
-    if (
-        not data_source_commit
-        or manifest.source.get("repository_commit") != data_source_commit
-        or manifest.identity.get("data_source_commit") != data_source_commit
+    if {"config", "lean_data", "raw_cache"} <= set(manifest.source):
+        source_projection = {
+            "config_source_commit": manifest.source["config"].get("repository_commit"),
+            "lean_data_source_commit": manifest.source["lean_data"].get("repository_commit"),
+            "raw_cache_source_commit": manifest.source["raw_cache"].get("repository_commit"),
+        }
+        for key, commit in source_projection.items():
+            if not commit or manifest.identity.get(key) != commit:
+                report.error(f"Source provenance is inconsistent for {key}")
+        for name, expected_kind in (
+            ("config", "data_config"),
+            ("lean_data", "lean_data"),
+            ("raw_cache", "raw_cache"),
+        ):
+            block = manifest.source[name]
+            if block.get("kind") != expected_kind or "present" not in block or "provenance" not in block:
+                report.error(f"Source provenance block {name} is incomplete")
+    elif not allow_legacy_provenance:
+        report.error("Legacy ef3 provenance requires allow_legacy_provenance=True")
+    elif (
+        not legacy_data_source_commit
+        or manifest.source.get("repository_commit") != legacy_data_source_commit
+        or manifest.identity.get("data_source_commit") != legacy_data_source_commit
     ):
-        report.error("Source data_source_commit provenance is inconsistent")
+        report.error("Legacy source data_source_commit provenance is inconsistent")
     projected_source_files = [
         {
             "path": item["path"],
@@ -332,6 +391,13 @@ def _validate_inventory(root: Path, manifest: DatasetManifest, report: Validatio
         producer_validation = json.loads((root / "validation_report.json").read_text(encoding="utf-8"))
         if producer_validation.get("valid") is not True:
             report.error("Producer validation_report.json is not valid")
+        outage_count = int(producer_validation.get("counts", {}).get("option_session_outages", 0))
+        outage_dates = list(producer_validation.get("option_session_outage_dates", []))
+        contract_dates = list(manifest.data_contract.get("option_session_outage_dates", []))
+        if outage_count != len(outage_dates) or outage_dates != contract_dates:
+            report.error("Option session outage metadata is inconsistent")
+        report.missingness["option_session_outages"] = outage_count
+        report.option_session_outage_dates = outage_dates
 
 
 def _validate_rows(
@@ -355,6 +421,8 @@ def _validate_rows(
         keys.add(key)
         if bar.resolution_seconds != 60:
             report.error(f"Non-one-minute bar for {bar.instrument_id}")
+        if bar.underlying != "NIFTY" or bar.market != "india":
+            report.error(f"Bar semantic scope mismatch for {bar.instrument_id}")
         if (bar.bar_end - bar.bar_start).total_seconds() != 60:
             report.error(f"Bar duration is not 60 seconds for {bar.instrument_id}")
         if not (bar.bar_start < bar.bar_end <= bar.available_at):
@@ -401,11 +469,27 @@ def _validate_rows(
             report.error(f"Invalid lot size/multiplier for {contract.instrument_id}")
         if contract.right != "call":
             report.warnings.append(f"Non-call contract present but excluded from initial corpus: {contract.instrument_id}")
+        expected_lot = (
+            contract.source_contract_multiplier
+            if contract.source_contract_multiplier is not None
+            else contract.resolved_contract_multiplier
+        )
+        if contract.lot_size != expected_lot:
+            report.error(f"Source-preferred lot_size policy mismatch for {contract.instrument_id}")
+        if contract.underlying != "NIFTY" or contract.market != "india" or contract.source_interval != "1minute":
+            report.error(f"Contract semantic scope mismatch for {contract.instrument_id}")
+        if not (
+            contract.first_session_date <= contract.last_session_date <= contract.expiry
+            and contract.first_bar <= contract.last_bar
+        ):
+            report.error(f"Contract lifecycle bounds invalid for {contract.instrument_id}")
 
     contracts_by_id = {contract.instrument_id: contract for contract in contracts}
     option_counts: dict[str, int] = defaultdict(int)
+    option_times: dict[str, list[dt.datetime]] = defaultdict(list)
     for bar in option_bars:
         option_counts[bar.instrument_id] += 1
+        option_times[bar.instrument_id].append(bar.available_at)
         contract = contracts_by_id.get(bar.instrument_id)
         if contract is None:
             report.error(f"Option bar has no contract metadata: {bar.instrument_id}")
@@ -414,6 +498,12 @@ def _validate_rows(
     for contract in contracts:
         if option_counts[contract.instrument_id] != contract.observed_bar_count:
             report.error(f"Contract observed_bar_count mismatch for {contract.instrument_id}")
+        times = option_times.get(contract.instrument_id, [])
+        if times and (
+            min(times).astimezone(dt.timezone.utc) != contract.first_bar.astimezone(dt.timezone.utc)
+            or max(times).astimezone(dt.timezone.utc) != contract.last_bar.astimezone(dt.timezone.utc)
+        ):
+            report.error(f"Contract availability bounds do not match bars for {contract.instrument_id}")
 
 
 def _validate_raw_tables(
@@ -522,7 +612,14 @@ def _validate_raw_tables(
         if declared_columns is not None and list(declared_columns) != ARROW_SCHEMAS[key].names:
             report.error(f"Manifest table columns mismatch for {filename}")
 
+    session_dates = [str(row["session_date"]) for row in tables["sessions"] if session_required <= set(row)]
+    if len(session_dates) != len(set(session_dates)):
+        report.error("Duplicate session_date rows are forbidden")
     sessions = {str(row["session_date"]): row for row in tables["sessions"] if session_required <= set(row)}
+    request_start = str(manifest.request.get("start_date"))
+    request_end = str(manifest.request.get("end_date"))
+    if sessions and (min(sessions) != request_start or max(sessions) != request_end):
+        report.error("Manifest request date range does not match session table")
     underlying_counts: dict[str, int] = defaultdict(int)
     for row in tables["underlying_bars"]:
         underlying_counts[str(row.get("session_date"))] += 1
@@ -564,6 +661,17 @@ def _validate_raw_tables(
                 report.error(f"UTC/IST timestamp mismatch in {table_name}")
             if row["source_timestamp_kind"] != manifest.data_contract.get("source_timestamp_kind"):
                 report.error(f"Timestamp provenance mismatch in {table_name}")
+            if table_name == "underlying_bars" and (
+                row["security_type"] != "index"
+                or row["exchange"] != "NSE"
+                or row["wave_trading_symbol"] != "NSE:NIFTY 50"
+            ):
+                report.error("Underlying partition security/exchange semantics mismatch")
+            if table_name == "option_bars" and (
+                row["security_type"] != "index_option"
+                or row["exchange"] != "NFO"
+            ):
+                report.error("Option partition security/exchange semantics mismatch")
             if str(row["session_date"]) != end_ist.date().isoformat():
                 report.error(f"Bar session_date mismatch in {table_name}")
             session = sessions.get(end_ist.date().isoformat())
@@ -572,10 +680,26 @@ def _validate_raw_tables(
                 session_close = session["session_close_ist"] if isinstance(session["session_close_ist"], dt.datetime) else dt.datetime.fromisoformat(str(session["session_close_ist"]))
                 if start_ist < session_open or end_ist > session_close:
                     report.error(f"Bar outside session in {table_name}: {row['instrument_id']}")
+                slot_delta = (start_ist - session_open).total_seconds()
+                if (
+                    slot_delta < 0
+                    or slot_delta % 60
+                    or end_ist != start_ist + dt.timedelta(seconds=60)
+                    or available_ist != end_ist
+                ):
+                    report.error(f"Bar is not aligned to the declared one-minute session grid in {table_name}")
             else:
                 report.error(f"Bar has no declared session in {table_name}: {row['instrument_id']}")
 
     contract_rows = {str(row["instrument_id"]): row for row in tables["contracts"] if "instrument_id" in row}
+    option_dates_by_contract: dict[str, set[str]] = defaultdict(set)
+    for option_row in tables["option_bars"]:
+        option_dates_by_contract[str(option_row["instrument_id"])].add(str(option_row["session_date"]))
+    source_inventory = {str(item["path"]): item for item in manifest.source_files}
+    source_members = {
+        path: {member["path"]: member["sha256"] for member in item.get("members", [])}
+        for path, item in source_inventory.items()
+    }
     for row in tables["contracts"]:
         if row.get("source_interval") != "1minute":
             report.error(f"Contract source_interval must be 1minute for {row.get('instrument_id')}")
@@ -594,6 +718,12 @@ def _validate_raw_tables(
             != expected_slots
         ):
             report.error(f"Contract observed/missing counts do not match sessions for {row.get('instrument_id')}")
+        observed_dates = option_dates_by_contract.get(str(row.get("instrument_id")), set())
+        if observed_dates and (
+            min(observed_dates) != str(row["first_session_date"])
+            or max(observed_dates) != str(row["last_session_date"])
+        ):
+            report.error(f"Contract session bounds do not match bars for {row.get('instrument_id')}")
     for row in tables["option_bars"]:
         contract = contract_rows.get(str(row.get("instrument_id")))
         if contract is None:
@@ -610,24 +740,18 @@ def _validate_raw_tables(
         ):
             if str(row.get(field)) != str(contract.get(field)):
                 report.error(f"Option/contract {field} mismatch for {row.get('instrument_id')}")
-        archive = next(
-            (item for item in manifest.source_files if item.get("path") == row.get("source_archive")),
-            None,
-        )
+        archive = source_inventory.get(str(row.get("source_archive")))
         if archive is None or archive.get("sha256") != row.get("source_archive_sha256"):
             report.error(f"Bar source archive provenance mismatch for {row.get('instrument_id')}")
         else:
-            members = {item["path"]: item["sha256"] for item in archive.get("members", [])}
+            members = source_members[str(row.get("source_archive"))]
             if members.get(row.get("source_member")) != row.get("source_member_sha256"):
                 report.error(f"Bar source member provenance mismatch for {row.get('instrument_id')}")
     for row in tables["underlying_bars"]:
-        archive = next(
-            (item for item in manifest.source_files if item.get("path") == row.get("source_archive")),
-            None,
-        )
+        archive = source_inventory.get(str(row.get("source_archive")))
         if archive is None or archive.get("sha256") != row.get("source_archive_sha256"):
             report.error(f"Underlying source archive provenance mismatch for {row.get('instrument_id')}")
         else:
-            members = {item["path"]: item["sha256"] for item in archive.get("members", [])}
+            members = source_members[str(row.get("source_archive"))]
             if members.get(row.get("source_member")) != row.get("source_member_sha256"):
                 report.error(f"Underlying source member provenance mismatch for {row.get('instrument_id')}")

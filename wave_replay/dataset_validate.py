@@ -16,6 +16,7 @@ class ValidationReport:
     warnings: list[str] = dataclasses.field(default_factory=list)
     counts: dict[str, int] = dataclasses.field(default_factory=dict)
     missingness: dict[str, int] = dataclasses.field(default_factory=dict)
+    option_session_outage_dates: list[str] = dataclasses.field(default_factory=list)
     provenance: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     def error(self, message: str) -> None:

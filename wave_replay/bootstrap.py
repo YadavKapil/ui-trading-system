@@ -98,6 +98,8 @@ class ReplayBootstrap:
         self._old_env: dict[str, str] | None = None
         self._initial_thread_ids: set[int | None] = set()
         self.filesystem_guard: FilesystemGuard | None = None
+        self._logging_state: dict | None = None
+        self._sandbox_handler: logging.Handler | None = None
 
     def __enter__(self) -> "ReplayBootstrap":
         try:
@@ -118,6 +120,7 @@ class ReplayBootstrap:
                 "WAVE_REPLAY": "1",
                 "PYTHONHASHSEED": "0",
             })
+            self._install_sandbox_logging()
             self._initial_thread_ids = {thread.ident for thread in threading.enumerate()}
             self._stack = contextlib.ExitStack()
             self._stack.enter_context(NetworkGuard(trace=self.trace, now=self.clock.now_ist).installed())
@@ -200,13 +203,12 @@ class ReplayBootstrap:
                 self.loader.unload_all()
             if self._stack is not None:
                 self._stack.close()
+            self._restore_logging()
             final_thread_ids = {thread.ident for thread in threading.enumerate()}
             self.trace.add(
                 "HOST_THREAD_INVENTORY",
                 at=self.scheduler.now,
                 details={
-                    "before_count": len(self._initial_thread_ids),
-                    "after_count": len(final_thread_ids),
                     "unchanged": final_thread_ids == self._initial_thread_ids,
                 },
             )
@@ -215,6 +217,7 @@ class ReplayBootstrap:
             self._assert_no_secret_leak()
             self._assert_sandbox_files()
         finally:
+            self._restore_logging()
             if self._old_env is not None:
                 os.environ.clear()
                 os.environ.update(self._old_env)
@@ -228,6 +231,7 @@ class ReplayBootstrap:
             self.loader.unload_all()
         if self._stack is not None:
             self._stack.close()
+        self._restore_logging()
         if self._old_env is not None:
             os.environ.clear()
             os.environ.update(self._old_env)
@@ -235,6 +239,41 @@ class ReplayBootstrap:
             os.chdir(self._old_cwd)
         if self._temp is not None:
             self._temp.cleanup()
+
+    def _install_sandbox_logging(self) -> None:
+        assert self.paths is not None
+        root = logging.getLogger()
+        self._logging_state = {
+            "handlers": list(root.handlers),
+            "filters": list(root.filters),
+            "level": root.level,
+            "disabled": root.disabled,
+            "propagate": root.propagate,
+        }
+        root.handlers[:] = []
+        root.filters[:] = []
+        handler = logging.FileHandler(self.paths.logs / "replay.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
+        handler.setLevel(logging.WARNING)
+        root.addHandler(handler)
+        root.setLevel(logging.WARNING)
+        root.disabled = False
+        self._sandbox_handler = handler
+
+    def _restore_logging(self) -> None:
+        if self._logging_state is None:
+            return
+        root = logging.getLogger()
+        if self._sandbox_handler is not None:
+            root.removeHandler(self._sandbox_handler)
+            self._sandbox_handler.close()
+        root.handlers[:] = self._logging_state["handlers"]
+        root.filters[:] = self._logging_state["filters"]
+        root.setLevel(self._logging_state["level"])
+        root.disabled = self._logging_state["disabled"]
+        root.propagate = self._logging_state["propagate"]
+        self._sandbox_handler = None
+        self._logging_state = None
 
     def _stage_source(self) -> None:
         assert self.paths is not None

@@ -96,6 +96,7 @@ class LegacyWaveRunner:
             ticker.on_order_update = module.on_order_update
             ticker.on_connect = module.on_connect
             ticker.on_ticks = module.on_ticks
+            ticker.connect()
 
             def on_bar(bar) -> None:
                 key = "underlying" if bar.security_type in {"index", "equity"} else "option"
@@ -482,7 +483,11 @@ class LegacyWaveRunner:
                 "dataset_id": self.dataset.manifest.dataset_id,
                 "manifest_sha256": self.dataset.manifest_sha256,
                 "implementation_commit": self.dataset.manifest.producer["implementation_commit"],
-                "data_source_commit": self.dataset.manifest.source["data_source_commit"],
+                "source_commits": {
+                    name: block["repository_commit"]
+                    for name, block in self.dataset.manifest.source.items()
+                    if isinstance(block, dict) and block.get("repository_commit")
+                },
             },
             "contract": {
                 "instrument_id": contract.instrument_id,
@@ -559,6 +564,12 @@ class LegacyWaveRunner:
                     "buy": module.global_restrict_buy,
                     "sell": module.global_restrict_sell,
                 },
+            },
+            "session_end": {
+                "snapshot_type": "boundary_before_day_order_cancellation",
+                "day_order_cancellation_modeled": False,
+                "subsequent_shutdown_poll_modeled": False,
+                "open_orders_and_positions_are_final_settlement": False,
             },
             "data_quality": {
                 **self.dataset.validation_report.to_mapping(),

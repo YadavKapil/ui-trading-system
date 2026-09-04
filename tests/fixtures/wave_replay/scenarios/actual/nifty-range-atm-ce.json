@@ -129,9 +129,9 @@
     "regular_orders": []
   },
   "market_dataset": {
-    "dataset_id": "wave-v1-c6fa0241890163bf8824",
+    "dataset_id": "wave-v1-decf49d20814ca53f132",
     "date": "2025-07-07",
-    "manifest_sha256": "a2c4eed1062c6d865b8c8082a8ff48c77bc553e1a246b6a92650f1c9c5a04376",
+    "manifest_sha256": "118a07249b68fff966220d27093b5f77f4ec2ccf91a56309ee826078133d0129",
     "missing_quote_policy": "fail",
     "schema": "wave-replay-dataset-v1"
   },
