@@ -1,6 +1,6 @@
 # Wave Extractor Historical Replay and Simulation Plan
 
-> **Executive summary:** Build the replay harness around the existing Wave Extractor before extracting or rewriting any strategy logic. Use actual Upstox-derived LEAN one-minute option and underlying bars already produced by the sibling `indian-wheel` repository as the first-class historical market path, but consume them only through an immutable, versioned Parquet/JSON export rather than a sibling-checkout dependency. The initial historical mode is deliberately simple and explicit: `cool_off_mode: disabled`, decisions and triggers use completed candle closes only, new orders become eligible on later bars, and touched orders fill at their limit. Run the current `ticker_single_scraper_new.py` and every Wave-reachable branch in `common_lib.py` against that market path plus a narrow fake Kite/Zerodha adapter, deterministic clock, isolated process state, and scripted broker/fault events. The first accepted result is a repeatable set of golden characterization traces and at least one end-to-end real-market-day replay whose report declares these modeling choices. Later OHLC-touch branching measures intraminute sensitivity; captured tick/second data is required for exact production cool-off fidelity. Corrections remain opt-in, and a clean core or LEAN adapter is a later consumer of the same datasets, scenarios, and trace contract.
+> **Executive summary:** Deliver this as two coordinated repository changes: the `indian-wheel` exporter branch/PR first, then the `ui-trading-system` simulator/consumer branch/PR against its immutable Parquet/JSON artifact. The approved initial historical corpus is NIFTY only: automatically identify verified one-minute range, trend, gap-open, and expiry/high-gamma days, then freeze one exact ATM CE contract per day. Choose the nearest expiry with 5-20 calendar DTE and nearest strike from the first completed underlying close after open; fail rather than relax those constraints. Each run starts flat with INR 1,000,000, no orders/GTTs, one date-effective lot, symmetric 10% premium gaps, regular orders, current saved step/delta/velocity settings, and same-side fill cooldown enabled. The initial market model remains explicit: `cool_off_mode: disabled`, `trigger_mode: close_only`, subsequent-bar activation, limit-price fills, and `broker_fee_model: upstox_approximation`. These are implementation defaults for the first characterization corpus, not universal strategy recommendations or claims of exact Zerodha/cool-off fidelity. Preserve the hermetic pre-import bootstrap and cooperative deterministic oracle; keep GTT and failure behavior in scripted characterization scenarios and defer clean-core/LEAN comparison until legacy traces are established.
 
 **Document status:** Implementation plan only. No production behavior is changed by this document.
 
@@ -40,6 +40,7 @@ Rules:
 
 - `legacy_equivalent` is the first deliverable and remains immutable after approval. If the production baseline changes, create a new baseline version rather than overwriting the old one.
 - The first actual one-minute market-day runs use the legacy decision path with required replay metadata `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`. They are not labeled fully legacy-equivalent for timing or intraminute execution. Exact production cool-off fidelity requires tick/second captures and remains a later characterization mode.
+- The NIFTY/ATM-CE/account/gap/order/fee values in section 10.3 are approved **initial implementation defaults**, not optimized parameters, profitability claims, or recommendations for other underlyings or production trading.
 - Every correction is a separately named flag. Do not create a broad `fixed=true` switch.
 - A correction must identify the scenario, legacy trace, corrected trace, risk rationale, and expected economic effect.
 - LEAN integration cannot redefine the legacy oracle. LEAN-only concepts must be mapped or reported as non-equivalent.
@@ -464,20 +465,48 @@ Use YAML for reviewable scenarios and JSONL/Parquet for large event streams. A s
 
 ```yaml
 schema_version: 1
-scenario_id: regular_buy_fill_callback_first
-mode: legacy_equivalent
+scenario_id: nifty_range_atm_ce
+mode: historical_modeled
 baseline_commit: "<sha>"
 seed: 104729
 timezone: Asia/Kolkata
-start_at: "2026-07-06T09:14:55+05:30"
+scenario_role: range
+selection:
+  selection_manifest: "manifests/nifty-representative-days-v1.json"
+  selection_manifest_sha256: "<sha256>"
+  selected_date: "2025-02-03"
+  first_completed_underlying_close_at: "2025-02-03T09:16:00+05:30"
+  first_completed_underlying_close: "<resolved>"
+  right: call
+  min_calendar_dte: 5
+  max_calendar_dte: 20
+  expiry: "<frozen YYYY-MM-DD>"
+  calendar_dte: "<frozen int>"
+  strike: "<frozen decimal>"
+  symbol: "<frozen exact NIFTY CE symbol>"
+  instrument_id: "<frozen source contract id>"
+  contract_metadata_sha256: "<sha256>"
+start_at: "2025-02-03T09:15:00+05:30"
 end_condition:
-  event_count: 200
-  or_time: "2026-07-06T09:25:00+05:30"
+  session_close: true
 config:
   configfile: "configs/default.ini"
+  configfile_sha256: "<sha256>"
   wave_extractor: "configs/nifty-default.json"
+  wave_extractor_sha256: "<sha256>"
   delta_limits: "configs/delta-default.json"
-instruments: "instruments/2026-07-06.json"
+  delta_limits_sha256: "<sha256>"
+  resolved_wave_settings:
+    source: current_ui_saved
+    multiplier_scale: "<frozen map>"
+    delta_multiplier: "<frozen map>"
+    velocity_guard: "<frozen map>"
+    fill_cooldown:
+      enabled: true
+      window_minutes: "<resolved>"
+      trigger_count: "<resolved>"
+      cooldown_duration_minutes: "<resolved>"
+instruments: "instruments/2025-02-03.json"
 market_dataset:
   dataset_id: "nifty-bcs-1m-2025-02-v1"
   path: "data/wave-replay/nifty-bcs-1m-2025-02-v1"
@@ -485,6 +514,9 @@ market_dataset:
   date: "2025-02-03"
   missing_quote_policy: fail
 initial:
+  cash:
+    currency: INR
+    amount: 1000000
   positions: []
   regular_orders: []
   gtts: []
@@ -492,28 +524,35 @@ initial:
   executed_orders: []
 workers:
   - instance_id: we-1
-    symbol: NIFTY...
-    buy_gap: 10
-    sell_gap: 10
-    buy_quantity: 65
-    sell_quantity: 65
-events: "broker/regular_buy_fill_callback_first.jsonl"
+    symbol: "<same frozen exact NIFTY CE symbol>"
+    option_close_at_selection: "<resolved positive close>"
+    buy_gap_pct: 0.10
+    sell_gap_pct: 0.10
+    buy_gap_points: "<round(option close * 0.10, 1)>"
+    sell_gap_points: "<round(option close * 0.10, 1)>"
+    lots: 1
+    lot_size: "<date-effective exported contract lot size>"
+    buy_quantity: "<lot_size>"
+    sell_quantity: "<lot_size>"
+    order_mode: regular
 replay:
   market_resolution: 1minute
   cool_off_mode: disabled
   trigger_mode: close_only
   fill_price_mode: limit
+  broker_fee_model: upstox_approximation
+  fee_schedule_sha256: "<sha256>"
   activation_policy: subsequent_bar
   equivalence_status: modeled_not_exact
 sensitivity:
   trigger_mode: ohlc_touch_branched
   branch_budget: 256
-broker_script: "broker/regular_buy_fill_callback_first.jsonl"
+broker_script: null
 expected:
-  golden: "goldens/regular_buy_fill_callback_first.jsonl"
+  golden: "goldens/nifty_range_atm_ce.jsonl"
 ```
 
-Reject scenarios with implicit current date, unpinned config, missing exchange, unversioned instrument or market data, a manifest hash mismatch, an undeclared dataset partition, or a non-deterministic seed.
+Reject scenarios with implicit current date, unfrozen contract selection, unpinned resolved Wave settings, missing exchange, unversioned instrument or market data, a manifest hash mismatch, an undeclared dataset partition, or a non-deterministic seed.
 
 ### 7.5 Portable historical dataset contract
 
@@ -865,7 +904,60 @@ Use synchronized one-minute NIFTY underlying and option data for every historica
 
 NIFTY index bars legitimately carry zero volume. Wave currently does not consume volume, so preserve zero and do not fabricate activity. If a later feature needs a volume signal, it must explicitly select synchronized NIFTYBEES as a proxy and treat that as corrected/new behavior, not legacy equivalence.
 
-### 10.3 Historical availability and contract lifecycle
+### 10.3 Approved initial corpus and scenario defaults
+
+These defaults define the first implementation corpus only. They are intentionally narrow, reviewable, and reproducible; they are not universal Wave configuration advice.
+
+#### Representative-day auto-selection
+
+The exporter inventories verified dates with complete one-minute NIFTY underlying coverage and at least one eligible one-minute CE contract. A versioned selector scores that candidate set and proposes one distinct day for each role:
+
+- `range`: low close-to-close directional efficiency relative to intraday range, with repeated movement around the session midpoint;
+- `trend`: high absolute session return and directional efficiency;
+- `gap_open`: largest absolute difference between the first completed close after open and the prior session's last completed close;
+- `expiry_high_gamma`: smallest eligible DTE and, as a tie-breaker, highest computed ATM gamma using the pinned Wave Greeks backend and synchronized first closes.
+
+Scoring uses the complete day only to choose test fixtures, never to make an in-replay trading decision. The selector records its version, formulas, inputs, candidate/exclusion reasons, scores, tie-breaks, and source hashes. Deterministic ties choose the earliest date. A reviewer approves the proposed days, after which `nifty-representative-days-v1.json` freezes the exact dates and scenario roles. If fewer than four distinct eligible days exist, fail corpus construction rather than reuse or weaken a role silently.
+
+#### Deterministic contract selection
+
+For each selected date:
+
+1. Use the first completed one-minute NIFTY underlying close available after the 09:15 IST session open (normally the bar available at 09:16) as the ATM reference.
+2. From exported contract metadata, retain NIFTY calls only.
+3. Compute calendar DTE as `expiry_date - trading_date`; retain only `5 <= DTE <= 20`.
+4. Choose the nearest eligible expiry, meaning the minimum expiry date/minimum DTE in that window. If none exists, fail the scenario; do not select below 5 or above 20 DTE.
+5. Within that expiry, retain contracts with valid date-effective lot size and required one-minute trade coverage.
+6. Select the strike minimizing absolute distance from the ATM reference. A distance tie chooses the lower strike, then the lexicographically smaller source instrument ID.
+7. Resolve the first synchronized positive option close available at the selection timestamp. If it is missing or non-positive, fail rather than switch contract.
+8. Freeze the date, first underlying close/time, exact symbol, source instrument ID, expiry, calendar DTE, strike, right, option close/time, lot size, and all source hashes into the scenario manifest.
+
+Selection runs once while constructing the corpus. Replay never reselects a contract, rolls expiry, or substitutes a symbol.
+
+#### Account, Wave, and order defaults
+
+Each initial historical scenario has exactly one Wave instance trading the frozen ATM CE:
+
+- flat starting portfolio;
+- no open regular orders;
+- no active GTTs;
+- INR 1,000,000 starting cash;
+- one lot, with quantity equal to the date-effective `lot_size` exported for that contract;
+- BUY gap = 10% of the selected option close;
+- SELL gap = 10% of the selected option close;
+- resolved absolute gaps rounded to one decimal before entering the existing legacy percentage-gap path;
+- regular order mode for the actual-data baseline;
+- `cool_off_mode: disabled` for the 10-second placement cool-off only;
+- same-side fill cooldown remains enabled using the current saved Wave configuration or current code defaults when absent;
+- current UI/saved step multiplier, delta multiplier/restrictions, and velocity settings, resolved once and frozen with their source files and hashes;
+- one-minute `close_only`, subsequent-bar activation, and limit-price fills;
+- `broker_fee_model: upstox_approximation`.
+
+The scenario manifest persists both raw configuration references and fully resolved values so later UI/config changes cannot alter a historical result. The report states that the Upstox fee schedule is an approximation for economic comparison and does **not** claim Zerodha brokerage/statutory/rounding fidelity.
+
+GTT behavior remains mandatory in scripted characterization and fault scenarios, but the initial actual-data baseline neither starts with a GTT nor requires regular-order failure to produce one naturally.
+
+### 10.4 Historical availability and contract lifecycle
 
 The exporter and selector must model source limitations:
 
@@ -881,7 +973,7 @@ The exporter and selector must model source limitations:
 
 Dataset selection fails early if the requested Wave symbol cannot be mapped to an exported contract or if the required underlying/held-option coverage is incomplete under the chosen missing-quote policy.
 
-### 10.4 Dual market and broker input model
+### 10.5 Dual market and broker input model
 
 Actual Upstox/LEAN data supplies market path:
 
@@ -904,7 +996,7 @@ It cannot supply Zerodha strategy-specific broker behavior. Keep a separate scri
 
 A historical scenario can use default deterministic broker semantics for ordinary placements and add only exceptional scripted events. Every trace marks whether a fill/status was `bar_inferred`, `recorded_broker`, or `scripted_fault`. Historical bars must never be treated as evidence that a specific callback or REST sequence occurred.
 
-### 10.5 Recorded-event and tick/quote fill models
+### 10.6 Recorded-event and tick/quote fill models
 
 When production broker events are available, replay actual acknowledgement, status sequence, filled quantity, average price, rejection reason, callback timestamp, and REST visibility timestamp. This remains the highest-fidelity broker model.
 
@@ -918,7 +1010,7 @@ If a future dataset supplies quotes:
 
 The current Upstox trade bars do not include bid/ask or queue position. Do not infer them silently.
 
-### 10.6 Initial trigger mode: `close_only`
+### 10.7 Initial trigger mode: `close_only`
 
 `close_only` is the required default for the first end-to-end Upstox/LEAN Wave backtest. It is a modeling simplification, not observed intraminute execution.
 
@@ -940,7 +1032,7 @@ For a valid positive bracket, enforce `buy_limit < sell_limit`; one close then c
 
 Because `close_only` ignores intraminute high/low touches, it will generally miss touches and undercount fills relative to a live/tick replay. Reports must label `trigger_mode=close_only`, count close-cross fills, and state this expected downward fill bias. Compare it later against `ohlc_touch_branched` on the same dataset and configuration.
 
-### 10.7 Sensitivity trigger mode: `ohlc_touch_branched`
+### 10.8 Sensitivity trigger mode: `ohlc_touch_branched`
 
 Convert each one-minute bar into an availability event at `bar_end`. Evaluate its full range only for orders that became eligible from a prior completed close and were active as the bar interval began. An order created from `C_t` never uses bar `t`; bar `t+1` is its first eligible full-range bar. Never apply already elapsed high/low to an order activated mid-bar by a scripted broker event.
 
@@ -984,7 +1076,7 @@ Reports must include ambiguous bar count, branch creations, merged/pruned states
 
 This mode is not the initial default. It is a later sensitivity analysis that estimates the effect of intraminute touches omitted by `close_only`.
 
-### 10.8 Fill prices, execution uncertainty, and fees
+### 10.9 Fill prices, execution uncertainty, and fees
 
 Trade bars have no bid/ask. The default `limit` policy fills a touched limit order at its limit price, then applies fees. This conservative no-price-improvement policy is valid for BUY and SELL and never executes a limit at a worse price than its limit.
 
@@ -998,9 +1090,9 @@ Slippage must never make a limit fill worse than its limit. Model execution unce
 
 Do not use bar volume as queue depth without an explicit participation model. NIFTY index zero volume is never used for option fills.
 
-Prefer `indian-wheel`'s portable fee engine inputs. The exporter should emit `fee_schedule.json` containing the resolved Upstox brokerage and date-effective Indian statutory rates, product/security mappings, DP-charge policy, currency rounding rules, schedule identifier, source path, and hash. This avoids importing sibling Python code at runtime while preserving its fee assumptions. If the fee policy becomes a separately versioned package later, the manifest pins that package version and resolved schedule.
+Use `indian-wheel`'s portable Upstox fee-engine inputs for the initial corpus. The exporter should emit `fee_schedule.json` containing the resolved Upstox brokerage and date-effective Indian statutory rates, product/security mappings, DP-charge policy, currency rounding rules, schedule identifier, source path, and hash. This avoids importing sibling Python code at runtime while preserving its fee assumptions. If the fee policy becomes a separately versioned package later, the manifest pins that package version and resolved schedule.
 
-Calculate brokerage, STT, exchange charges, SEBI charges, GST, stamp duty, and any applicable DP charge after inferred fills. In `legacy_equivalent`, fees and slippage affect economic reports but not decisions unless current Wave code consumes them. LEAN comparisons must use the same exported fee schedule and fill model or report the difference explicitly.
+Set `broker_fee_model=upstox_approximation` in the scenario, trace header, and every economic report. Calculate brokerage, STT, exchange charges, SEBI charges, GST, stamp duty, and any applicable DP charge after inferred fills. Never label this result as Zerodha fee fidelity. In `legacy_equivalent`, fees and slippage affect economic reports but not decisions unless current Wave code consumes them. LEAN comparisons must use the same exported fee schedule and fill model or report the difference explicitly.
 
 ## 11. State, process, and persistence isolation
 
@@ -1145,8 +1237,11 @@ Every row below expands into focused scenarios for CE and PE where direction mat
 | Bootstrap preflight | Wave import only after sandbox activation; fake Kite/MonitoredKite/ticker modules constructed; real config/home/repo paths denied; network/DNS/HTTP attempt emits sanitized `UNEXPECTED_NETWORK_ACCESS`; memcache disabled/hit/miss/error fixtures; SQLite/WAL/SHM under sandbox; canary secrets absent from every artifact; unload/reimport starts clean |
 | Cooperative tasks | callback during simulated sleep; nested callback at yield; simultaneous callback/poll priority permutations; delayed five-second status refresh; timer fire/cancel/join timeout/liveness; direct `_thread` denial; no real OS thread; repeated task traces byte-identical |
 | Initial state | flat; long option; short option; non-zero initial position; unrelated portfolio positions; current position changes during init; missing/stale instrument data |
-| Exported actual days | one-minute NIFTY range day; one-sided trend; gap open; expiry/near-expiry high-gamma day; incomplete/illiquid day; exact dataset ID and manifest hash in every result |
-| Initial replay model | `market_resolution=1minute`; `cool_off_mode=disabled`; both legacy quote reads see `C_t`; `COOL_OFF_BYPASSED` trace; `trigger_mode=close_only`; `fill_price_mode=limit`; `equivalence_status=modeled_not_exact` |
+| Exported actual days | auto-score then freeze distinct one-minute NIFTY range, trend, gap-open, and expiry/high-gamma days; exact selected dates/contracts, selector version/scores, dataset ID, and manifest hashes in every scenario |
+| Contract selector | first completed NIFTY close after open; CE only; nearest expiry inside inclusive 5-20 calendar DTE; nearest valid strike with deterministic tie-break; positive synchronized option close; fail on no eligible contract; frozen exact symbol and metadata |
+| Initial account | INR 1,000,000 cash; flat positions; no regular orders; no GTTs; one Wave worker; one date-effective exported lot |
+| Initial settings | symmetric 10% option-premium gaps; current UI/saved step, delta, restrictions, and velocity settings frozen with hashes; same-side fill cooldown enabled from current config/default; regular orders; `broker_fee_model=upstox_approximation` |
+| Initial replay model | `market_resolution=1minute`; `cool_off_mode=disabled` only for placement sleep; both legacy quote reads see `C_t`; `COOL_OFF_BYPASSED` trace; `trigger_mode=close_only`; `fill_price_mode=limit`; `equivalence_status=modeled_not_exact` |
 | Bar timestamps | LEAN end-keyed row; candle start-keyed row; exact completion boundary; decision from `C_t`; no same-bar activation/fill; first eligible `C_(t+1)`; UTC/IST equivalence |
 | Close-only triggers | neither close predicate; BUY-only close crossing; SELL-only close crossing; high/low-only touch ignored; overlapping/inverted bracket rejected; explicit malformed-order override; close-price sensitivity; undercount versus OHLC touch |
 | OHLC sensitivity | neither touched; only BUY; only SELL; both siblings touched; `LOW_FIRST`; `HIGH_FIRST`; `CANCELLATION_LATENCY_STRESS`; GTT trigger/child; fill/cancel and fill/modify in one bar; O-L-H-C/O-H-L-C; seeded Brownian-bridge sensitivity; exclude; equivalent-state merge; branch-budget pruning |
@@ -1157,9 +1252,9 @@ Every row below expands into focused scenarios for CE and PE where direction mat
 | Delta multiplier | below/at/above soft limit; cap; positive/negative delta; CE/PE direction; Greeks failure fallback; stale positions; quote-cache hit/miss; multiple expiries |
 | Hard restrictions | below/at/above min/max; per-expiry versus total delta; missing expiry config/default; no expiry lookup; positive-position BUY restriction; NIFTY premium <=25 exception |
 | Velocity | insufficient history; threshold equality; upward/downward crossing; CE/PE side mapping; old samples trimmed; REST spot failure; stale tick versus fresh quote; process-local histories |
-| Cooldown | below threshold; exact trigger; repeated same-side fills; opposite-side fill; expiry/lift; callback lost then polling completion; restart clears cooldown; duplicate workers do not share cooldown |
+| Same-side fill cooldown | remains enabled while placement cool-off is disabled; current/default values frozen; below threshold; exact trigger; repeated same-side fills; opposite-side fill; expiry/lift; callback lost then polling completion; restart clears cooldown; duplicate workers do not share cooldown |
 | Regular placement | both succeed; SELL fails/BUY succeeds; SELL succeeds/BUY fails; both fail; retry succeeds on attempts 2-5; all retries fail; broker returns numeric/string IDs |
-| GTT fallback | SELL-only GTT; BUY-only GTT; two GTTs; GTT create failure; market closes between legs; trigger `OPEN`; immediate `COMPLETE`; missed callback then poll; missing/wrong tag; delete failure; trigger/delete race |
+| GTT fallback | scripted characterization only for initial corpus: SELL-only GTT; BUY-only GTT; two GTTs; GTT create failure; market closes between legs; trigger `OPEN`; immediate `COMPLETE`; missed callback then poll; missing/wrong tag; delete failure; trigger/delete race |
 | Partial fills | one partial; many partials; partial then complete; partial then cancel; partial then reject; both siblings partially fill; position visible before callback; average-price evolution |
 | Callback order | OPEN/COMPLETE; COMPLETE-only; COMPLETE-before-OPEN; duplicate COMPLETE; sibling simultaneous fills; CANCELLED after local delete; callback while guard held; callback during cool-off; auto-reprice echo versus manual override |
 | Polling | empty history; stale OPEN; COMPLETE; CANCELLED; REJECTED; history timeout; terminal cache; reconnect cache flush; GTT child visible only through `orders()` |
@@ -1268,7 +1363,11 @@ CI must never auto-accept goldens.
 
 Keep actual Upstox/LEAN market-day results adjacent to, but distinct from, broker-characterization goldens:
 
+- the result names the approved initial-default profile and frozen representative-day/ATM-CE selection manifest;
+- the trace header includes exact contract metadata, date-effective lot size, initial INR 1,000,000 cash, flat/no-order/no-GTT state, one-lot quantity, 10% gap inputs/resolved points, regular-order mode, and hashes of every resolved saved/default Wave setting;
 - the initial result uses `cool_off_mode=disabled`, `trigger_mode=close_only`, and `fill_price_mode=limit`; it is golden only for that declared model and is never labeled exact production timing/execution;
+- same-side fill cooldown state/config remains visible independently of disabled placement cool-off;
+- economic output declares `broker_fee_model=upstox_approximation` and explicitly disclaims Zerodha fee fidelity;
 - the report states that close-only triggering ignores intraminute touches and normally undercounts fills;
 - a separate `close_price` fill sensitivity may be shown, never substituted into the default result;
 - later `ohlc_touch_branched` sensitivity forks or terminates at each ambiguous bar according to the selected policy;
@@ -1429,15 +1528,16 @@ Validation produces a machine-readable report consumed by the replay result. A r
 
 ### 17.4 Market-day corpus selection
 
-After inventorying exact coverage, select and freeze at least:
+After inventorying exact coverage, run the versioned selector in section 10.3 to propose and then freeze exactly four distinct NIFTY dates:
 
 - a range-bound NIFTY day with repeated level touches;
 - a directional/trend day that stresses one-sided fills, velocity, and delta widening;
 - a gap-open day;
-- an expiry or near-expiry high-gamma day;
-- a day with known missing/illiquid option bars to verify failure/unknown reporting.
+- the eligible nearest-expiry/high-gamma day.
 
-Each selection records why it was chosen, the required contracts/strike window, and actual missingness. Both underlying and required option bars must be verified at one-minute resolution. Do not substitute any coarser stock, index, or option data; an uncovered day remains unsupported.
+For each day, select one ATM CE with inclusive 5-20 calendar DTE using the first completed NIFTY close after open, then freeze the exact symbol and all contract metadata in the scenario manifest. Each selection records why it was chosen, selector scores/tie-breaks, candidate exclusions, first underlying and option closes, expiry/DTE/strike/right, date-effective lot size, required strike window, and actual missingness. Both underlying and selected option bars must be verified at one-minute resolution. Do not substitute another right, expiry outside the DTE window, another underlying, or any coarser data; an uncovered role remains unsupported and fails corpus construction.
+
+The initial actual-data corpus has four single-instance scenarios, each starting from the approved account/settings profile in section 10.3. Missing/illiquid-data behavior remains covered by focused validation and scripted fixtures; it does not replace one of the four representative baseline days.
 
 ### 17.5 Broker captures and scripted fixtures
 
@@ -1452,17 +1552,17 @@ Redact credentials, account identifiers, and unrelated trades. Preserve order re
 
 ### 17.6 Cross-repository ownership and sequencing
 
-Implement as two coordinated sessions/PRs:
+Implement as exactly two coordinated repo-specific branches/PRs:
 
 1. **`indian-wheel` exporter PR:** define `wave-replay-dataset-v1`, read actual Upstox/LEAN/config/manifest inputs, normalize timestamps, export Parquet/JSON/fee schedule, validate provenance, and publish one checksummed sample dataset artifact.
-2. **`ui-trading-system` consumer/harness PR:** pin supported schema versions, load and validate portable exports, convert bars to scheduler events, run the legacy Wave worker, and report ambiguity/missingness.
+2. **`ui-trading-system` simulator/consumer PR:** after the exporter artifact is available, pin supported schema versions, load and validate portable exports, auto-select/freeze the initial NIFTY corpus, convert bars to scheduler events, run the legacy Wave worker, and report ambiguity/missingness.
 
 Sequence:
 
 1. Review and freeze schema v1 with representative rows and manifest before either implementation depends on it.
-2. Merge or otherwise make the exporter PR available first.
+2. Implement and merge, or otherwise make available for review, the `indian-wheel` exporter branch/PR first.
 3. Produce and validate the sample actual-data export.
-4. Implement the consumer against the artifact, not the producer checkout.
+4. Only then implement the `ui-trading-system` simulator/consumer branch/PR against the artifact, not the producer checkout.
 5. Add compatibility tests using the schema example plus an end-to-end actual export.
 6. Treat incompatible schema changes as a new major version; keep older consumers and datasets reproducible.
 
@@ -1475,15 +1575,15 @@ Estimates assume one engineer familiar with Python, Kite Connect, and the reposi
 | Phase | Deliverables | Owner | Estimate | Exit gate |
 |---|---|---|---:|---|
 | 0. Freeze and inventory | Wave baseline SHA/reachability/issue catalog plus exact `indian-wheel` config, root, archive, contract, resolution, date-range, missingness, multiplier, fee, and timestamp inventory | Both repos | 3-5 days | Inventory reviewed; unavailable history is explicit; no rewrite started |
-| 1. Hermetic bootstrap and task runtime | Pre-import sandbox, source staging, fake import modules, fail-closed network, deterministic memcache, isolated SQLite/files, `SimTaskRuntime`, fresh worker namespaces, and Gate 0 tests | `ui-trading-system` | 7-10 days | Gate 0 passes; no Wave import precedes bootstrap; no real thread/network/production path; no golden may yet be approved |
-| 2. Legacy characterization shell | Cooperative existing-code runner, FakeKite/FakeTicker, SimClock, startup/duo/callback/task permutations, subprocess boundary lane, first candidate traces | `ui-trading-system` | 6-9 days | Gate 0 remains green; task/interleaving traces are byte-identical; current code remains oracle; first goldens may be reviewed |
-| 3. Dataset schema and exporter | Freeze `wave-replay-dataset-v1`; implement `indian-wheel` export command, Parquet tables, manifest, resolved fees, hash/partition validator | `indian-wheel` | 7-10 days | One immutable one-minute NIFTY export passes producer validation |
-| 4. Dataset consumer and scheduler | Consumer validator, bar availability conversion, scenario binding, stable scheduler, ID normalization, repeated-run checks | `ui-trading-system` | 7-10 days | Producer and consumer reports match; 100 runs have identical hashes |
-| 5. Initial actual-market Wave days | Run current legacy decision path on exported one-minute NIFTY range, trend, gap-open, and expiry/high-gamma days with `cool_off_mode=disabled`, `trigger_mode=close_only`, and `fill_price_mode=limit` | `ui-trading-system` | 5-8 days | At least one complete E2E replay declares the model, missingness, fill undercount caveat, and `modeled_not_exact` status |
+| 1. Exporter branch/PR | Freeze `wave-replay-dataset-v1`; implement the `indian-wheel` export command, Parquet tables, provenance, date-effective lot sizes, Upstox fee schedule, selector inputs, and hash/partition validation | `indian-wheel` | 7-10 days | Exporter PR is available first; one immutable one-minute NIFTY export passes producer validation |
+| 2. Simulator/consumer foundation | Start the dependent `ui-trading-system` PR; implement dataset consumer, pre-import sandbox, fake modules, fail-closed network, deterministic memcache, isolated SQLite/files, `SimTaskRuntime`, fresh worker namespaces, and Gate 0 | `ui-trading-system` | 10-14 days | Artifact compatibility and Gate 0 pass; no real thread/network/production path; no golden may yet be approved |
+| 3. Legacy characterization shell | Cooperative existing-code runner, FakeKite/FakeTicker, SimClock, startup/duo/callback/task permutations, subprocess boundary lane, first candidate traces | `ui-trading-system` | 6-9 days | Gate 0 remains green; task/interleaving traces are byte-identical; current code remains oracle; first goldens may be reviewed |
+| 4. Initial NIFTY corpus selection | Auto-score verified dates for range/trend/gap-open/expiry-high-gamma roles; select one 5-20 DTE ATM CE from first completed close; freeze four scenario manifests and resolved current settings | `ui-trading-system` | 3-5 days | Four distinct dates/contracts pass review; no relaxed DTE/right/resolution fallback; all settings and hashes frozen |
+| 5. Initial actual-market Wave days | Run one regular-order Wave instance per frozen NIFTY ATM CE with flat INR 1,000,000 account, one date-effective lot, symmetric 10% gaps, enabled same-side fill cooldown, disabled placement cool-off, close-only triggers, limit fills, and Upstox fee approximation | `ui-trading-system` | 5-8 days | Four baseline runs declare all approved defaults, data quality, fill undercount caveat, fee approximation, and `modeled_not_exact` status |
 | 6. OHLC-touch sensitivity | Re-run the same actual days with `ohlc_touch_branched`, LOW_FIRST/HIGH_FIRST, optional cancellation-latency stress, state merging, and branch budgets | `ui-trading-system` | 5-8 days | Close-only versus OHLC comparison and conditional outcome dispersion are reported separately |
 | 7. Fake regular broker and scripted fault matrix | Orders, positions, partial fills, rejects, cancel/modify races, callback permutations, visibility lag, API failures layered over actual or minimal market paths | `ui-trading-system` | 7-10 days | Regular-order transition and reconciliation matrix passes |
-| 8. GTT and lifecycle fidelity | GTT state machine, child tags, reconnect, market close, restart/crash, persistence failures | `ui-trading-system` | 7-10 days | GTT, recovery, and close-boundary goldens approved |
-| 9. Risk and multi-instance fidelity | Step/delta/velocity/cooldown/repricing, synchronized portfolio bars, cooperative worker namespaces, shared broker truth, and subprocess boundary checks | `ui-trading-system` | 7-10 days | Risk boundaries, missing-quote policies, worker isolation, and multi-worker races covered |
+| 8. Scripted GTT and lifecycle fidelity | GTT state machine, child tags, reconnect, market close, restart/crash, and persistence failures outside the initial natural historical baseline | `ui-trading-system` | 7-10 days | GTT, recovery, and close-boundary characterization goldens approved |
+| 9. Risk and multi-instance fidelity | Step/delta/velocity/fill-cooldown/repricing, synchronized portfolio bars, cooperative worker namespaces, shared broker truth, and subprocess boundary checks | `ui-trading-system` | 7-10 days | Current-setting boundaries, missing-quote policies, worker isolation, and multi-worker races covered |
 | 10. Golden corpus and coverage closure | Actual-day result set, sanitized broker captures, scripted scenarios, reachable-branch closure, CI artifact workflow | Both repos | 5-8 days | Cooperative legacy oracle and modeled actual-data replay corpus approved |
 | 11. Corrected mode | Individual correction flags and reviewed golden deltas | `ui-trading-system` | 5-10 days | Each fix isolated, reversible, and differentially tested |
 | 12. Clean core | Incremental extraction/reimplementation behind ports | `ui-trading-system` | 10-20 days | Full scenario parity or approved flag-specific deltas |
@@ -1495,7 +1595,7 @@ Expected effort:
 - Corrected mode plus clean-core migration: an additional 3-6 weeks.
 - LEAN integration: an additional 2-3 weeks after the portable data boundary exists.
 
-Parallelize exporter implementation and scripted broker modeling only after schema v1 and the legacy trace contract are frozen. Phase 2 may inspect candidate traces, but **no golden approval begins until Phase 1 Gate 0 and cooperative-task determinism pass**. Do not block initial characterization on the exporter, and do not begin the clean rewrite before both golden scenarios and actual-day replay gates pass.
+The implementation order is strict: exporter branch/PR first, validated artifact second, simulator/consumer branch/PR third. Within the consumer PR, candidate characterization traces may be inspected after Gate 0, but **no golden approval begins until hermetic bootstrap and cooperative-task determinism pass**. Do not begin the clean rewrite before both golden scenarios and the four approved actual-day runs pass.
 
 ## 19. Verification gates
 
@@ -1540,6 +1640,8 @@ Any failure blocks Phase 2 characterization and all golden approval.
 - Every historical replay partition has synchronized one-minute underlying and option bars; all non-60-second partitions are rejected.
 - Start/end/availability-time tests prove no bar is visible before completion.
 - Initial-mode tests prove both legacy quote reads use completed close `C_t`, cool-off is bypassed and traced, an order from `C_t` cannot fill on bar `t`, and its first eligible close is `C_(t+1)`.
+- Corpus selection tests deterministically score four distinct NIFTY roles, use the first completed close after open, enforce CE and inclusive 5-20 calendar DTE, choose the nearest expiry/strike with documented tie-breaks, and fail rather than relax a constraint.
+- Every approved scenario freezes the exact symbol/contract/lot-size metadata, selector result, current resolved Wave settings, and source hashes.
 - NIFTY zero volume, absent OI, absent contracts, and missing option bars remain explicit rather than fabricated or forward-filled.
 
 ### Gate D: Determinism
@@ -1564,9 +1666,10 @@ Any failure blocks Phase 2 characterization and all golden approval.
 
 ### Gate G: Golden and historical credibility
 
-- At least one full Wave replay runs end to end on exported one-minute NIFTY Upstox/LEAN data with `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`.
-- Range, trend, gap-open, and expiry/high-gamma days are covered where the verified inventory permits.
+- Four single-instance Wave replays run end to end on the frozen one-minute NIFTY range, trend, gap-open, and expiry/high-gamma scenarios.
+- Each replay uses one ATM CE with 5-20 calendar DTE, flat INR 1,000,000 account, no starting orders/GTTs, one date-effective lot, symmetric 10% gaps, regular orders, current frozen step/delta/velocity settings, enabled same-side fill cooldown, `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`.
 - The first report quantifies close-cross fills, missing contracts/bars, unknown quotes, and provenance, and states that ignored high/low touches can undercount fills.
+- Economic reports state `broker_fee_model=upstox_approximation` and do not imply Zerodha fee fidelity.
 - Later sensitivity reports quantify unambiguous OHLC touches, ambiguous/touched/excluded bars, LOW_FIRST/HIGH_FIRST/latency-stress branches, state merges/pruning, branch count/budget, outcome range, and P&L/exposure dispersion.
 - Reports never present a single headline P&L without cool-off, trigger, fill-price, ambiguity, and pruning policies.
 - A failure/reconnect session is backed by a sanitized real capture where available or an explicit scripted broker stream.
@@ -1635,31 +1738,39 @@ The historical replay/simulation effort is complete only when all of the followi
 8. Golden decision/state/interleaving traces come only from the cooperative oracle. A separate non-golden subprocess lane validates fresh imports, process/global boundaries, signals, `atexit`, crash, shutdown, and restart.
 9. Teardown unloads/reimports workers cleanly, restores host state, removes the sandbox, and leaves no production or temporary runtime artifact behind.
 10. The unmodified legacy decision path runs hermetically against narrow fake Kite/ticker adapters, simulated clock, and cooperative tasks.
-11. `indian-wheel` has a reviewed exporter for `wave-replay-dataset-v1` that reads actual configured Upstox/LEAN roots, including isolated `lean_data_name` roots, without exposing source-format logic to the consumer.
-12. At least one immutable, gitignored one-minute NIFTY option/underlying export includes Parquet data, JSON manifest, session calendar, contract metadata, fee schedule, source/config/archive hashes, exact date/resolution/count inventory, and validation report.
-13. `ui-trading-system` consumes that export by path/artifact and manifest hash without importing sibling modules or traversing to a sibling checkout.
-14. Timestamp tests prove LEAN end-time and candle start-time sources share a no-lookahead `available_at` convention, and orders created from `C_t` cannot fill on bar `t`.
-15. At least one current Wave legacy-decision-path run completes end to end on exported `indian-wheel` market data with `cool_off_mode=disabled`, `trigger_mode=close_only`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`, and reports fills, state, positions, fees, P&L, provenance, missing contracts/bars, and unknown quotes.
-16. The historical corpus includes range, trend, gap-open, and expiry/high-gamma days where verified synchronized one-minute coverage permits; no coarser data is accepted for any historical Wave test.
-17. Portfolio-delta decisions identify synchronized source bars for every held option and spot; missing option bars are never forward-filled.
-18. NIFTY zero volume remains source-zero, and no synthetic volume or undeclared NIFTYBEES proxy enters legacy behavior.
-19. The harness replays deterministic option/spot availability events, callbacks, REST snapshots, errors, process events, and file events without live network, wall-clock sleeping, or uncontrolled concurrency.
-20. Regular orders, GTTs, child orders, partial fills, rejects, timeouts, retries, cancellation/modify races, and callback/polling reconciliation are modeled through a broker/fault stream separate from historical bars.
-21. Initial close-only timing is explicit: both legacy quote reads see synchronized completed `C_t`, cool-off is bypassed and traced, new orders become eligible only from `C_(t+1)`, and high/low never drives this mode; exact production cool-off equivalence is reserved for tick/second captures.
-22. `close_only` fills BUY only on a later close at/below its limit and SELL only on a later close at/above its limit, rejects overlapping/inverted brackets by default, fills at the limit, and reports optional close-price sensitivity separately.
-23. A later `ohlc_touch_branched` run forks independent `LOW_FIRST` and `HIGH_FIRST` Wave/broker states, with optional `CANCELLATION_LATENCY_STRESS`; deterministic O-L-H-C/O-H-L-C and seeded Brownian-bridge runs remain secondary sensitivity analyses.
-24. Branch state hashing/merging, budget, deterministic pruning, and approximate/bounded labeling are implemented, and all-low-first/all-high-first paths are not called exact global bounds without proof.
-25. No limit executes worse than its limit, and execution uncertainty is represented by missed/probabilistic fills or scripted broker behavior.
-26. Market hours, holidays, expiry/DTE, contract roll/lifecycle, tick-size behavior, disabled initial cool-off, 180-second polling, delayed refresh, and market-close shutdown are deterministic.
-27. Step multipliers, percentage gaps, portfolio-delta multipliers, per-expiry hard restrictions, velocity, cooldown, repricing, low-premium exception, and asymmetric quantities have boundary scenarios.
-28. Crash, restart, stale status, orphan regular order, orphan GTT, missed callback, and duplicate-instance scenarios have approved outcomes.
-29. Status files, executed-order persistence, dashboard overlay/injection, notification side effects, exported fee inputs, execution assumptions, positions, and P&L are represented in canonical traces or explicitly scoped as analytics.
-30. Every deterministic scenario produces a byte-identical canonical trace across repeated runs.
-31. All Wave-reachable branches are covered or have a reviewed, specific waiver, and known implementation issues are characterized as legacy behavior before any correction is enabled.
-32. An approved legacy golden corpus includes modeled actual market-path days, scripted failure/reconnect, and multi-instance behavior, using sanitized real broker captures where available.
-33. Actual-data results present the close-only baseline separately from OHLC-touch sensitivity and ambiguous branched outcomes, including ambiguity counts, branch count, merge/prune statistics, outcome ranges, and P&L/exposure dispersion; no single headline P&L appears without cool-off, trigger, fill-price, and ambiguity policies.
-34. Differential tests detect seeded strategy, data-availability, and orchestration divergences and report the first causal mismatch.
-35. `legacy_equivalent`, individually flagged `corrected`, and `lean_comparison` outputs are separate and clearly labeled; no correction becomes default without reviewed trace deltas.
-36. No clean core or LEAN implementation is considered equivalent based only on aggregate fills or P&L.
+11. The work is delivered as two coordinated repo-specific branches/PRs: the `indian-wheel` exporter first, followed by the `ui-trading-system` simulator/consumer against its artifact.
+12. `indian-wheel` has a reviewed exporter for `wave-replay-dataset-v1` that reads actual configured Upstox/LEAN roots, including isolated `lean_data_name` roots, without exposing source-format logic to the consumer.
+13. At least one immutable, gitignored one-minute NIFTY option/underlying export includes Parquet data, JSON manifest, session calendar, contract metadata, date-effective lot sizes, Upstox fee schedule, source/config/archive hashes, exact date/resolution/count inventory, and validation report.
+14. `ui-trading-system` consumes that export by path/artifact and manifest hash without importing sibling modules or traversing to a sibling checkout.
+15. Timestamp tests prove LEAN end-time and candle start-time sources share a no-lookahead `available_at` convention, and orders created from `C_t` cannot fill on bar `t`.
+16. A versioned selector automatically proposes four distinct verified one-minute NIFTY dates for range, trend, gap-open, and expiry/high-gamma roles; its formulas, scores, candidate exclusions, ties, version, and source hashes are persisted.
+17. Each selected date uses the first completed NIFTY close after open, CE right, nearest expiry inside inclusive 5-20 calendar DTE, and nearest valid strike with deterministic tie-breaks. Missing eligibility fails rather than relaxing DTE, right, resolution, or underlying.
+18. Review-approved scenario manifests freeze the exact selected date, role, underlying close/time, symbol, instrument ID, expiry, DTE, strike, right, option close/time, date-effective lot size, selector/config/data hashes, and fully resolved Wave settings.
+19. Four initial actual-data runs each use one Wave instance and one frozen ATM CE contract.
+20. Each initial account starts with INR 1,000,000 cash, a flat portfolio, no open regular orders, no active GTTs, and quantity equal to one date-effective lot.
+21. Each initial run uses BUY and SELL gaps equal to 10% of the selected option premium, current UI/saved step/delta/restriction/velocity settings, and same-side fill cooldown enabled from current config/defaults; all inputs and resolved values are hashed in the scenario.
+22. The initial actual-data baseline uses regular orders. GTT behavior remains covered by scripted characterization/fault scenarios and is not required to arise naturally in those four days.
+23. Each initial run declares `cool_off_mode=disabled`, `trigger_mode=close_only`, `activation_policy=subsequent_bar`, `fill_price_mode=limit`, and `equivalence_status=modeled_not_exact`.
+24. Each economic report declares `broker_fee_model=upstox_approximation`, uses the exported Upstox schedule, and explicitly does not claim Zerodha fee fidelity.
+25. Portfolio-delta decisions identify synchronized source bars for every held option and spot; missing option bars are never forward-filled.
+26. NIFTY zero volume remains source-zero, and no synthetic volume or undeclared NIFTYBEES proxy enters legacy behavior.
+27. The harness replays deterministic option/spot availability events, callbacks, REST snapshots, errors, process events, and file events without live network, wall-clock sleeping, or uncontrolled concurrency.
+28. Regular orders, GTTs, child orders, partial fills, rejects, timeouts, retries, cancellation/modify races, and callback/polling reconciliation are modeled through a broker/fault stream separate from historical bars.
+29. Initial close-only timing is explicit: both legacy quote reads see synchronized completed `C_t`, placement cool-off is bypassed and traced, new orders become eligible only from `C_(t+1)`, and high/low never drives this mode; same-side fill cooldown remains enabled.
+30. `close_only` fills BUY only on a later close at/below its limit and SELL only on a later close at/above its limit, rejects overlapping/inverted brackets by default, fills at the limit, and reports optional close-price sensitivity separately.
+31. A later `ohlc_touch_branched` run forks independent `LOW_FIRST` and `HIGH_FIRST` Wave/broker states, with optional `CANCELLATION_LATENCY_STRESS`; deterministic O-L-H-C/O-H-L-C and seeded Brownian-bridge runs remain secondary sensitivity analyses.
+32. Branch state hashing/merging, budget, deterministic pruning, and approximate/bounded labeling are implemented, and all-low-first/all-high-first paths are not called exact global bounds without proof.
+33. No limit executes worse than its limit, and execution uncertainty is represented by missed/probabilistic fills or scripted broker behavior.
+34. Market hours, holidays, expiry/DTE, contract roll/lifecycle, tick-size behavior, disabled placement cool-off, 180-second polling, delayed refresh, and market-close shutdown are deterministic.
+35. Step multipliers, percentage gaps, portfolio-delta multipliers, per-expiry hard restrictions, velocity, same-side fill cooldown, repricing, low-premium exception, and asymmetric quantities have boundary scenarios.
+36. Crash, restart, stale status, orphan regular order, orphan GTT, missed callback, and duplicate-instance scenarios have approved outcomes.
+37. Status files, executed-order persistence, dashboard overlay/injection, notification side effects, exported fee inputs, execution assumptions, positions, and P&L are represented in canonical traces or explicitly scoped as analytics.
+38. Every deterministic scenario produces a byte-identical canonical trace across repeated runs.
+39. All Wave-reachable branches are covered or have a reviewed, specific waiver, and known implementation issues are characterized as legacy behavior before any correction is enabled.
+40. An approved legacy golden corpus includes modeled actual market-path days, scripted failure/reconnect/GTT, and multi-instance behavior, using sanitized real broker captures where available.
+41. Actual-data results present the close-only baseline separately from OHLC-touch sensitivity and ambiguous branched outcomes, including ambiguity counts, branch count, merge/prune statistics, outcome ranges, and P&L/exposure dispersion; no single headline P&L appears without cool-off, trigger, fill-price, fee, and ambiguity policies.
+42. Differential tests detect seeded strategy, data-availability, and orchestration divergences and report the first causal mismatch.
+43. `legacy_equivalent`, individually flagged `corrected`, and `lean_comparison` outputs are separate and clearly labeled; no correction becomes default without reviewed trace deltas.
+44. No clean core or LEAN implementation is considered equivalent based only on aggregate fills or P&L.
 
 The first implementation milestone is therefore a characterization test around the existing code, not a rewrite. The first cross-repository milestone is a portable, validated actual-data export, not a runtime link between checkouts. The first durable result is the combined legacy golden characterization corpus and quantified actual-market replay corpus; the clean core and LEAN adapter follow from them.
