@@ -37,6 +37,8 @@ class BrokerOrder:
     average_price: Decimal = Decimal("0")
     variety: str = "regular"
     bracket_id: str | None = None
+    validity: str = "DAY"
+    rejection_reason: str | None = None
     history: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
     @property
@@ -44,7 +46,7 @@ class BrokerOrder:
         return self.quantity - self.filled_quantity
 
     def api_dict(self) -> dict[str, Any]:
-        return {
+        value = {
             "order_id": self.order_id,
             "tradingsymbol": self.symbol,
             "instrument_token": self.instrument_token,
@@ -62,6 +64,11 @@ class BrokerOrder:
             "variety": self.variety,
             "bracket_id": self.bracket_id,
         }
+        if self.validity != "DAY":
+            value["validity"] = self.validity
+        if self.rejection_reason is not None:
+            value["rejection_reason"] = self.rejection_reason
+        return value
 
 
 @dataclasses.dataclass
@@ -146,6 +153,11 @@ class BrokerEngine:
         self.realized_pnl = Decimal("0")
         self._brokerage_charged_orders: set[str] = set()
         self.fill_events: list[dict[str, Any]] = []
+        self.exchange_session_open = True
+        self.day_cancellation_count = 0
+        self.post_close_rejection_count = 0
+        self.roll_rejection_count = 0
+        self._blocked_symbols: set[str] = set()
 
     def bind_callback_dispatch(self, callback: Callable[[dict[str, Any], float, int], None]) -> None:
         self._callback_dispatch = callback
@@ -186,8 +198,31 @@ class BrokerEngine:
             created_at=self.scheduler.now,
             variety=str(request.get("variety", "regular")),
             bracket_id=request.get("bracket_id"),
+            validity=str(request.get("validity", "DAY")).upper(),
         )
         self.orders_by_id[order_id] = order
+        if order.variety == "regular" and (
+            not self.exchange_session_open or symbol in self._blocked_symbols
+        ):
+            if not self.exchange_session_open:
+                order.rejection_reason = "exchange_session_closed"
+                self.post_close_rejection_count += 1
+            else:
+                order.rejection_reason = "simulator_contract_roll"
+                self.roll_rejection_count += 1
+            self._transition(
+                order,
+                "REJECTED",
+                callback_delay=self.visibility.callback_seconds,
+                reason=order.rejection_reason,
+            )
+            self.trace.add(
+                "BROKER_CALL",
+                at=self.scheduler.now,
+                operation="place_order",
+                details={"order": order.api_dict(), "state_hash": self.snapshot_hash()},
+            )
+            return order_id
         if order.bracket_id is None:
             sibling = next(
                 (
@@ -332,11 +367,29 @@ class BrokerEngine:
         failure = self.faults.pop("place_gtt")
         if failure and not failure.apply_side_effect:
             raise_failure(failure)
+        symbol = str(request["tradingsymbol"])
+        if not self.exchange_session_open or symbol in self._blocked_symbols:
+            reason = (
+                "exchange_session_closed"
+                if not self.exchange_session_open
+                else "simulator_contract_roll"
+            )
+            if not self.exchange_session_open:
+                self.post_close_rejection_count += 1
+            else:
+                self.roll_rejection_count += 1
+            self.trace.add(
+                "BROKER_GTT_REJECTED",
+                at=self.scheduler.now,
+                actor=symbol,
+                details={"reason": reason},
+            )
+            raise RuntimeError(f"Cannot place GTT for {symbol}: {reason}")
         self._trigger_counter += 1
         orders = [dict(value) for value in request["orders"]]
         trigger = GttTrigger(
             trigger_id=self._trigger_counter,
-            symbol=str(request["tradingsymbol"]),
+            symbol=symbol,
             exchange=str(request["exchange"]),
             trigger_values=tuple(Decimal(str(value)) for value in request["trigger_values"]),
             orders=orders,
@@ -421,6 +474,130 @@ class BrokerEngine:
             }
             for trigger in sorted(self.gtts_by_id.values(), key=lambda item: item.trigger_id)
         ]
+
+    def open_exchange_session(self) -> None:
+        self.exchange_session_open = True
+        self.trace.add(
+            "EXCHANGE_SESSION_OPEN",
+            at=self.scheduler.now,
+            details={"positions": sorted(self.positions_by_symbol), "active_gtts": self.active_gtt_count()},
+        )
+
+    def close_exchange_session(self) -> list[str]:
+        self.exchange_session_open = False
+        cancelled = self.cancel_open_day_orders(reason="exchange_day_close")
+        self.trace.add(
+            "EXCHANGE_SESSION_CLOSE",
+            at=self.scheduler.now,
+            details={"cancelled_day_orders": cancelled, "active_gtts": self.active_gtt_count()},
+        )
+        return cancelled
+
+    def cancel_open_day_orders(self, *, reason: str) -> list[str]:
+        cancelled = []
+        for order in sorted(self.orders_by_id.values(), key=lambda item: int(item.order_id)):
+            if order.status in {"OPEN", "ACK", "PARTIAL"} and order.validity == "DAY":
+                order.rejection_reason = reason
+                self._transition(
+                    order,
+                    "CANCELLED",
+                    callback_delay=self.visibility.callback_seconds,
+                    reason=reason,
+                )
+                cancelled.append(order.order_id)
+        self.day_cancellation_count += len(cancelled)
+        return cancelled
+
+    def liquidate_position(self, symbol: str, *, price: Decimal, reason: str) -> str | None:
+        position = self.positions_by_symbol.get(symbol)
+        quantity = 0 if position is None else int(position.get("quantity", 0))
+        if quantity == 0:
+            return None
+        order_id = self.place_order(
+            variety="regular",
+            exchange="NFO",
+            tradingsymbol=symbol,
+            transaction_type="SELL" if quantity > 0 else "BUY",
+            quantity=abs(quantity),
+            product=str(position.get("product", "NRML")),
+            order_type="MARKET",
+            price=price,
+            validity="DAY",
+            tag=f"SIM_ROLL_{reason}",
+        )
+        order = self.orders_by_id[order_id]
+        if order.status == "REJECTED":
+            raise RuntimeError(f"Roll liquidation rejected for {symbol}")
+        self._apply_fill(order, quantity=order.remaining, price=price, complete=True)
+        self.trace.add(
+            "SIMULATOR_ROLL_LIQUIDATION",
+            at=self.scheduler.now,
+            actor=symbol,
+            details={"order_id": order_id, "price": str(price), "reason": reason},
+        )
+        return order_id
+
+    def block_symbol_until_session_end(self, symbol: str) -> None:
+        self._blocked_symbols.add(symbol)
+        self.trace.add(
+            "BROKER_SYMBOL_BLOCKED",
+            at=self.scheduler.now,
+            actor=symbol,
+            details={"reason": "simulator_contract_roll"},
+        )
+
+    def active_gtt_count(self, symbol: str | None = None) -> int:
+        return sum(
+            trigger.status == "active" and (symbol is None or trigger.symbol == symbol)
+            for trigger in self.gtts_by_id.values()
+        )
+
+    def current_equity(self) -> Decimal:
+        market_value = sum(
+            Decimal(str(position.get("last_price", 0))) * int(position.get("quantity", 0))
+            for position in self.positions_by_symbol.values()
+        )
+        return self.cash + market_value
+
+    def mark_to_market(self, symbol: str, price: Decimal) -> None:
+        self._mark_to_market(symbol, price)
+
+    def export_persistent_state(self) -> dict[str, Any]:
+        if any(
+            order.status in {"OPEN", "ACK", "PARTIAL"} and order.validity == "DAY"
+            for order in self.orders_by_id.values()
+        ):
+            raise RuntimeError("Cannot persist active DAY orders across sessions")
+        return {
+            "cash": self.cash,
+            "fees_paid": self.fees_paid,
+            "realized_pnl": self.realized_pnl,
+            "positions": copy.deepcopy(self.positions_by_symbol),
+            "gtts": copy.deepcopy(self.gtts_by_id),
+            "order_counter": self._order_counter,
+            "trigger_counter": self._trigger_counter,
+            "day_cancellation_count": self.day_cancellation_count,
+            "post_close_rejection_count": self.post_close_rejection_count,
+            "roll_rejection_count": self.roll_rejection_count,
+        }
+
+    def restore_persistent_state(self, state: dict[str, Any]) -> None:
+        self.cash = Decimal(str(state["cash"]))
+        self.fees_paid = Decimal(str(state["fees_paid"]))
+        self.realized_pnl = Decimal(str(state["realized_pnl"]))
+        self.positions_by_symbol = copy.deepcopy(state["positions"])
+        self._visible_positions = copy.deepcopy(state["positions"])
+        self.gtts_by_id = copy.deepcopy(state["gtts"])
+        self._order_counter = int(state["order_counter"])
+        self._trigger_counter = int(state["trigger_counter"])
+        self.day_cancellation_count = int(state.get("day_cancellation_count", 0))
+        self.post_close_rejection_count = int(state.get("post_close_rejection_count", 0))
+        self.roll_rejection_count = int(state.get("roll_rejection_count", 0))
+        self.orders_by_id = {}
+        self.latest_quotes = {}
+        self.fill_events = []
+        self.exchange_session_open = True
+        self._blocked_symbols = set()
 
     def snapshot(self) -> dict[str, Any]:
         return {

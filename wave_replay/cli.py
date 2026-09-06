@@ -16,6 +16,11 @@ from .broker_engine import BrokerEngine
 from .clock import SimClock
 from .compare import approve_golden, compare_jsonl
 from .coverage_manifest import assert_wave_coverage_complete, build_wave_coverage
+from .continuous import (
+    ContinuousReplayConfig,
+    ContinuousWaveRunner,
+    ReplayDatasetCollection,
+)
 from .datasets import ReplayDataset
 from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
@@ -52,6 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--repository-root", default=".")
     replay.add_argument("--output", required=True)
     replay.add_argument("--repeat", type=int, default=1)
+
+    continuous = subparsers.add_parser("replay-continuous")
+    continuous.add_argument("--datasets", action="append", required=True)
+    continuous.add_argument("--start", required=True)
+    continuous.add_argument("--end", required=True)
+    continuous.add_argument("--output", required=True)
+    continuous.add_argument("--repeat", type=int, default=1)
+    continuous.add_argument("--repository-root", default=".")
+    continuous.add_argument("--wave-config", default="wave_extractor_config.json")
+    continuous.add_argument("--delta-limits", default="delta_limits.json")
+    continuous.add_argument("--config")
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--expected", required=True)
@@ -114,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "replay":
         return _run_replay(args)
+    if args.command == "replay-continuous":
+        return _run_continuous_replay(args)
     if args.command == "compare":
         difference = compare_jsonl(args.expected, args.actual)
         print(json.dumps(difference.__dict__, indent=2, sort_keys=True))
@@ -189,6 +207,65 @@ def _run_replay(args) -> int:
         encoding="utf-8",
     )
     print(json.dumps({"report": str((output / "report.json").resolve()), "trace_digest": digests[0]}, sort_keys=True))
+    return 0
+
+
+def _run_continuous_replay(args) -> int:
+    collection = ReplayDatasetCollection.from_inputs(args.datasets)
+    settings, hashes = load_saved_wave_settings(
+        args.wave_config,
+        delta_limits_path=args.delta_limits,
+    )
+    overrides = (
+        json.loads(Path(args.config).read_text(encoding="utf-8"))
+        if args.config
+        else {}
+    )
+    config = ContinuousReplayConfig.from_mapping(
+        overrides,
+        wave_settings=settings,
+        wave_settings_hashes=hashes,
+        default_start=args.start,
+        default_end=args.end,
+    )
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    digests = []
+    reports = []
+    for index in range(args.repeat):
+        report, trace = ContinuousWaveRunner(
+            repository_root=args.repository_root,
+            collection=collection,
+            config=config,
+        ).run()
+        trace.write_jsonl(
+            output
+            / (f"continuous-trace-{index + 1}.jsonl" if args.repeat > 1 else "continuous-trace.jsonl")
+        )
+        digests.append(trace.digest())
+        reports.append(report)
+    if len(set(digests)) != 1 or len({report["report_hash"] for report in reports}) != 1:
+        raise RuntimeError(
+            f"Non-deterministic continuous replay: traces={digests}, "
+            f"reports={[report['report_hash'] for report in reports]}"
+        )
+    final_report = reports[-1]
+    final_report["determinism"] = {
+        "repetitions": args.repeat,
+        "trace_digest": digests[0],
+        "report_hash": final_report["report_hash"],
+    }
+    report_path = output / "continuous-report.json"
+    report_path.write_text(
+        json.dumps(final_report, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {"report": str(report_path.resolve()), "trace_digest": digests[0]},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

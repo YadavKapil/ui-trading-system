@@ -77,6 +77,8 @@ class ReplayDataset:
         *,
         validate: bool = True,
         allow_legacy_provenance: bool = False,
+        allow_special_sessions_v3: bool = False,
+        allow_partial_underlying: bool = False,
     ) -> "ReplayDataset":
         root = Path(root).resolve()
         manifest_path = root / "manifest.json"
@@ -87,6 +89,8 @@ class ReplayDataset:
             manifest,
             report,
             allow_legacy_provenance=allow_legacy_provenance,
+            allow_special_sessions_v3=allow_special_sessions_v3,
+            allow_partial_underlying=allow_partial_underlying,
         )
 
         tables: dict[str, list[dict[str, Any]]] = {}
@@ -263,6 +267,8 @@ def _validate_inventory(
     report: ValidationReport,
     *,
     allow_legacy_provenance: bool,
+    allow_special_sessions_v3: bool,
+    allow_partial_underlying: bool,
 ) -> None:
     declared = set(manifest.declared_files)
     if declared != DECLARED_FILES:
@@ -290,16 +296,28 @@ def _validate_inventory(
         "fee_model": "upstox_approximation",
     }
     is_authoritative_v11 = manifest.schema_version == "1.1.0"
-    integrity_profile = (
-        "wave-replay-authoritative-sessions-v2"
-        if is_authoritative_v11
-        else "wave-replay-bound-sources-v1"
-    )
     profile_identity = manifest.identity.get("integrity_profile")
     profile_contract = manifest.data_contract.get("integrity_profile")
-    if profile_identity != integrity_profile or profile_contract != integrity_profile:
+    accepted_profiles = (
+        {
+            "wave-replay-authoritative-sessions-v2",
+            "wave-replay-special-sessions-v3",
+        }
+        if is_authoritative_v11 and allow_special_sessions_v3
+        else {
+            "wave-replay-authoritative-sessions-v2"
+            if is_authoritative_v11
+            else "wave-replay-bound-sources-v1"
+        }
+    )
+    if (
+        profile_identity not in accepted_profiles
+        or profile_contract != profile_identity
+    ):
         if not allow_legacy_provenance:
-            report.error(f"Release dataset requires integrity_profile={integrity_profile}")
+            report.error(
+                f"Release dataset requires integrity_profile in {sorted(accepted_profiles)}"
+            )
     if is_authoritative_v11:
         calendar_profile = "lean-market-hours-requested-range-v1"
         coverage = manifest.data_contract.get("underlying_session_coverage")
@@ -329,11 +347,26 @@ def _validate_inventory(
                 or manifest.identity.get("session_calendar_definition_sha256") != definition_hash
             ):
                 report.error("Authoritative session calendar definition hash is inconsistent")
-            if (
+            if profile_identity == "wave-replay-special-sessions-v3" and not isinstance(
+                definition.get("special_sessions"),
+                dict,
+            ):
+                report.error("Special-session v3 requires a date-keyed special_sessions map")
+            partial_dates = list(coverage.get("partial_underlying_session_dates", []))
+            missing_dates = list(coverage.get("missing_underlying_session_dates", []))
+            partial_mode_valid = (
+                allow_partial_underlying
+                and profile_identity == "wave-replay-special-sessions-v3"
+                and not missing_dates
+                and bool(partial_dates)
+            )
+            if not partial_mode_valid and (
                 coverage.get("coverage_complete") is not True
                 or coverage.get("equivalence_eligible") is not True
             ):
                 report.error("Authoritative underlying session coverage is not equivalence eligible")
+            if allow_partial_underlying and missing_dates:
+                report.error("Continuous replay rejects fully missing underlying sessions")
     for key, expected in required_contract.items():
         if manifest.data_contract.get(key) != expected:
             report.error(f"Manifest data_contract {key} must be {expected!r}")
@@ -615,6 +648,64 @@ def _validate_rows(
             report.error(f"Contract availability bounds do not match bars for {contract.instrument_id}")
 
 
+def session_segments_for_date(
+    definition: dict[str, Any],
+    session_date: dt.date,
+) -> list[dict[str, str]]:
+    date_key = session_date.isoformat()
+    special_sessions = (
+        definition.get("special_sessions")
+        or definition.get("special_session_overrides")
+        or {}
+    )
+    special = special_sessions.get(date_key)
+    if special is not None:
+        if isinstance(special, dict):
+            special = special.get("segments") or [special]
+        return [dict(segment) for segment in special]
+    if date_key in set(definition.get("holidays", [])):
+        return []
+    weekday_names = (
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    )
+    segments = [
+        dict(segment)
+        for segment in definition.get("market_segments", {}).get(
+            weekday_names[session_date.weekday()],
+            [],
+        )
+    ]
+    if not segments:
+        return []
+    late_open = definition.get("late_opens", {}).get(date_key)
+    early_close = definition.get("early_closes", {}).get(date_key)
+    if late_open is not None:
+        segments[0]["start"] = _calendar_override_time(late_open, "start")
+    if early_close is not None:
+        segments[-1]["end"] = _calendar_override_time(early_close, "end")
+    return segments
+
+
+def _calendar_override_time(value: Any, field: str) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        if value.get(field):
+            return str(value[field])
+        if value.get("time"):
+            return str(value["time"])
+        segments = value.get("segments")
+        if segments:
+            return str(segments[0 if field == "start" else -1][field])
+    raise SchemaError(f"Invalid calendar {field} override: {value!r}")
+
+
 def _validate_raw_tables(
     tables: dict[str, list[dict[str, Any]]],
     manifest: DatasetManifest,
@@ -735,18 +826,29 @@ def _validate_raw_tables(
         if expected_dates != sorted(sessions):
             report.error("Authoritative expected session dates do not match sessions table")
         definition = coverage.get("definition", {})
-        segments = definition.get("market_segments", {})
-        holidays = set(definition.get("holidays", []))
         derived_dates = []
         cursor = dt.date.fromisoformat(request_start)
         end_date = dt.date.fromisoformat(request_end)
-        weekday_names = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
         while cursor <= end_date:
-            if segments.get(weekday_names[cursor.weekday()]) and cursor.isoformat() not in holidays:
+            if session_segments_for_date(definition, cursor):
                 derived_dates.append(cursor.isoformat())
             cursor += dt.timedelta(days=1)
         if derived_dates != expected_dates:
             report.error("Authoritative expected session dates are not derived from calendar definition")
+        for date_key, session in sessions.items():
+            expected_segments = session_segments_for_date(
+                definition,
+                dt.date.fromisoformat(date_key),
+            )
+            if expected_segments:
+                expected_open = str(expected_segments[0]["start"])
+                expected_close = str(expected_segments[-1]["end"])
+                actual_open = session["session_open_ist"].strftime("%H:%M:%S")
+                actual_close = session["session_close_ist"].strftime("%H:%M:%S")
+                if actual_open != expected_open or actual_close != expected_close:
+                    report.error(
+                        f"Session {date_key} times do not match authoritative calendar override"
+                    )
     option_session_dates = {str(row["session_date"]) for row in tables["option_bars"]}
     derived_outages = sorted(set(sessions) - option_session_dates)
     if derived_outages != sorted(report.option_session_outage_dates):
@@ -770,6 +872,26 @@ def _validate_raw_tables(
             != int(session["expected_bar_count"])
         ):
             report.error(f"Session underlying missingness does not reconcile for {session_date}")
+    if manifest.schema_version == "1.1.0" and isinstance(coverage, dict):
+        derived_partial_dates = sorted(
+            session_date
+            for session_date, session in sessions.items()
+            if 0 < int(session["missing_underlying_bar_count"]) < int(session["expected_bar_count"])
+        )
+        derived_missing_dates = sorted(
+            session_date
+            for session_date, session in sessions.items()
+            if int(session["observed_bar_count"]) == 0
+            or int(session["missing_underlying_bar_count"]) == int(session["expected_bar_count"])
+        )
+        if derived_partial_dates != sorted(
+            coverage.get("partial_underlying_session_dates", [])
+        ):
+            report.error("Partial underlying session declarations do not match Arrow contents")
+        if derived_missing_dates != sorted(
+            coverage.get("missing_underlying_session_dates", [])
+        ):
+            report.error("Missing underlying session declarations do not match Arrow contents")
     for table_name in ("underlying_bars", "option_bars"):
         for row in tables[table_name]:
             if not common_bar <= set(row):

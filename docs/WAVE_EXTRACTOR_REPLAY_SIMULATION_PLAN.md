@@ -1793,3 +1793,28 @@ python -m pytest -q tests\test_wave_replay_actual_release.py
 ```
 
 The command rejects missing directories, invalid manifests, and dataset ID or manifest-hash mismatches. The environment variable converts optional integration skips into failures. No market-data artifact is committed.
+
+## Continuous full-period replay
+
+`replay-continuous` composes the staged single-session legacy oracle without turning Wave into a rewritten strategy. Each authoritative trading session launches a fresh isolated `ticker_single_scraper_new.py` worker. FakeKite cash, positions, cumulative fees, realized P&L, order/GTT identifiers, and active GTTs persist; process globals, caches, callback listeners, status files, and regular-order views reset. Regular orders are DAY orders: the exchange close event cancels every unfilled DAY order after the final completed bar, cancellation callbacks retain configured visibility ordering, and any callback-driven replacement after close is recorded as rejected and cannot survive overnight. The staged 180-second loop exits on its first post-close poll and runs its captured signal/`atexit` cleanup.
+
+The continuous input is a producer-owned `collection_manifest.json` with schema `wave-replay-dataset-collection-v1`. It lists one immutable v1.1 dataset root per authoritative session, in exact date order, with dataset IDs and manifest hashes. Continuous partitions require `integrity_profile=wave-replay-special-sessions-v3`; the earlier authoritative-sessions-v2 profile remains supported only by the frozen single-day baseline. A canonical collection ID/hash and an exact compatibility block bind schema, producer implementation, source repository commits, fee schedule, and session-calendar definition. Top-level `underlying=NIFTY`, `start_date`, `end_date`, `session_calendar_definition`, and date-keyed `special_sessions` are cross-bound. The producer-shaped `session_calendar` block contains the exact sorted `partial_underlying_session_dates` and `missing_underlying_session_dates`; do not duplicate them as additional top-level fields. Expected dates are independently derived from weekly hours, holidays, special sessions, early closes, and late opens. Missing, duplicate, reordered, changed, incompatible, path-escaping, or multi-session partitions fail. The consumer loads and validates only the current daily partition, retains only broker/contract/report state, then releases its bars before loading the next date; monolithic all-options exports are intentionally rejected.
+
+The simulator adds a continuous contract policy that is **not original Wave behavior**. At the first synchronized completed underlying/option minute, the eligible universe is strictly OTM NIFTY calls in the nearest listed expiry with at least two calendar DTE. Only premiums in the inclusive INR 35-65 range qualify; select closest to INR 50, then lower strike, then instrument ID. Do not scan a later expiry merely to obtain an in-range premium. If no contract qualifies, remain flat without launching Wave and retry next session.
+
+A held contract is checked at its first synchronized quote each session. Keep it only when it still has at least two DTE and its premium remains inside INR 35-65. Otherwise, cancel its Wave orders/GTTs, close its complete position at that synchronized close with fees, and select a replacement at the same timestamp. A missing opening quote delays this check without using stale data. Separately, on the authoritative session immediately before the next actual collection session would be one calendar DTE before expiry, cancel DAY orders/GTTs and liquidate at the last synchronized executable close by one minute before the authoritative close (15:29 on an ordinary session). The next session starts flat and selects again. Switches and expiry exits are simulator-owned events, and old/new exposure never overlaps.
+
+Authoritative calendar rows drive ordinary, holiday, weekend-special, and other special-session open/close times. The continuous default for a missing underlying or held-option minute is `skip_decision`: both quote marks are invalidated, no fill/restriction/reprice uses stale data, and decisions resume only when synchronized completed bars return. Reports list each skipped timestamp/reason and skipped duration.
+
+The final report includes minute equity, realized/unrealized P&L, cash, fees, drawdown and peak/trough times, annual/monthly summaries, session contracts and risk outputs, trades and immutable partial-fill events, DAY cancellations, post-close rejections, worker cleanup, overnight positions/GTTs, missingness, and roll economics. End-of-input economics are reported twice: the primary boundary MTM leaves the broker position notionally open at the final synchronized close, while a separate non-mutating forced-close sensitivity applies an explicit exit fee and reports hypothetical realized P&L/cash.
+
+```powershell
+python -m wave_replay.cli replay-continuous `
+  --datasets data\wave-replay\full-period\collection_manifest.json `
+  --start 2024-11-01 `
+  --end 2026-04-08 `
+  --output artifacts\wave-continuous `
+  --repeat 2
+```
+
+An optional JSON config uses schema `wave-replay-continuous-config-v1`, version 1, and may set `start`, `end`, `missing_quote_policy` (fixed to `skip_decision`), and date-keyed `session_broker_scripts`. Any supplied strategy block is validation-only and must preserve the approved close-only/subsequent-bar/limit-fill/10%-gap/cool-off-disabled/fill-cooldown-enabled/INR-1m profile.

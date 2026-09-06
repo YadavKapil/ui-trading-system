@@ -354,7 +354,10 @@ class ReplayScenario:
     def _validate(self) -> None:
         if not self.symbol.startswith("NIFTY") or not self.symbol.endswith("CE"):
             raise SchemaError("Initial historical scenarios require an exact NIFTY CE symbol")
-        if not 5 <= self.calendar_dte <= 20:
+        if self.role == "continuous":
+            if self.calendar_dte < 2:
+                raise SchemaError("Continuous contract must have at least 2 calendar DTE")
+        elif not 5 <= self.calendar_dte <= 20:
             raise SchemaError("Selected contract must have 5-20 calendar DTE")
         if self.lot_size <= 0 or self.option_close_at_selection <= 0:
             raise SchemaError("Lot size and selected option close must be positive")

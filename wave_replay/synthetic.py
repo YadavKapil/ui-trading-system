@@ -75,12 +75,18 @@ def _bar(
     }
 
 
-def create_synthetic_dataset(root: str | Path) -> Path:
+def create_synthetic_dataset(
+    root: str | Path,
+    *,
+    corpus: list[dict[str, Any]] | None = None,
+    calendar_definition_override: dict[str, Any] | None = None,
+    integrity_profile_override: str | None = None,
+) -> Path:
     """Create four tiny NIFTY days exercising the approved selector roles."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     dataset_id = "synthetic-nifty-wave-v1"
-    corpus = [
+    corpus = corpus or [
         {
             "role": "trend",
             "date": dt.date(2024, 11, 22),
@@ -131,6 +137,10 @@ def create_synthetic_dataset(root: str | Path) -> Path:
     option_rows: list[dict[str, Any]] = []
     contracts: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
+    total_underlying_missing = 0
+    total_option_missing = 0
+    partial_underlying_dates: list[str] = []
+    missing_underlying_dates: list[str] = []
 
     for day_index, item in enumerate(corpus):
         trading_date = item["date"]
@@ -139,8 +149,25 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         expiry = item["expiry"]
         lot_size = item["lot_size"]
         missing_count = item["missing"]
-        session_start = dt.datetime.combine(trading_date, dt.time(9, 15), tzinfo=IST)
-        session_close = dt.datetime.combine(trading_date, dt.time(15, 30), tzinfo=IST)
+        missing_underlying_rows = set(item.get("missing_underlying_rows", []))
+        missing_option_rows = set(item.get("missing_option_rows", [])) | set(range(missing_count))
+        total_underlying_missing += len(missing_underlying_rows)
+        total_option_missing += len(missing_option_rows)
+        session_start = dt.datetime.combine(
+            trading_date,
+            item.get("session_open", dt.time(9, 15)),
+            tzinfo=IST,
+        )
+        session_close = dt.datetime.combine(
+            trading_date,
+            item.get("session_close", dt.time(15, 30)),
+            tzinfo=IST,
+        )
+        bar_count = int((session_close - session_start).total_seconds() // 60)
+        if len(missing_underlying_rows) == bar_count:
+            missing_underlying_dates.append(trading_date.isoformat())
+        elif missing_underlying_rows:
+            partial_underlying_dates.append(trading_date.isoformat())
         sessions.append({
             "session_date": trading_date,
             "market": "india",
@@ -151,15 +178,15 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "session_open_ist": session_start,
             "session_close_ist": session_close,
             "resolution_seconds": 60,
-            "observed_bar_count": 375,
-            "expected_bar_count": 375,
-            "missing_underlying_bar_count": 0,
-            "special_session": False,
+            "observed_bar_count": bar_count - len(missing_underlying_rows),
+            "expected_bar_count": bar_count,
+            "missing_underlying_bar_count": len(missing_underlying_rows),
+            "special_session": bool(item.get("special_session", False)),
             "source_archive": "synthetic/nifty-index.zip",
             "source_archive_sha256": sha256_bytes(b"archive:nifty-index"),
         })
         previous = first_close
-        for row_index in range(375):
+        for row_index in range(bar_count):
             if row_index == 0:
                 close = first_close
             elif item["role"] == "trend":
@@ -174,19 +201,20 @@ def create_synthetic_dataset(root: str | Path) -> Path:
                 close = strike + Decimal((row_index % 6) - 3)
             high = max(previous, close) + Decimal("1")
             low = min(previous, close) - Decimal("1")
-            underlying_rows.append(_bar(
-                instrument_id="nifty-index",
-                source_instrument_id="NSE_INDEX|Nifty 50",
-                wave_symbol="NSE:NIFTY 50",
-                lean_symbol="NIFTY",
-                underlying="NIFTY",
-                security_type="index",
-                exchange="NSE",
-                start=session_start + dt.timedelta(minutes=row_index),
-                values=(previous, high, low, close),
-                volume=0,
-                row=day_index * 10 + row_index,
-            ))
+            if row_index not in missing_underlying_rows:
+                underlying_rows.append(_bar(
+                    instrument_id="nifty-index",
+                    source_instrument_id="NSE_INDEX|Nifty 50",
+                    wave_symbol="NSE:NIFTY 50",
+                    lean_symbol="NIFTY",
+                    underlying="NIFTY",
+                    security_type="index",
+                    exchange="NSE",
+                    start=session_start + dt.timedelta(minutes=row_index),
+                    values=(previous, high, low, close),
+                    volume=0,
+                    row=day_index * 10 + row_index,
+                ))
             previous = close
 
         instrument_id = f"NIFTY|{expiry.isoformat()}|C|{int(strike)}"
@@ -202,6 +230,9 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         lean_symbol = f"NIFTY {expiry:%y%m%d}C{int(strike * 1000):08d}"
         metadata_sha = sha256_bytes(f"{instrument_id}:metadata".encode())
         token = derive_replay_instrument_token(instrument_id)
+        available_option_rows = [
+            index for index in range(bar_count) if index not in missing_option_rows
+        ]
         contracts.append({
             "instrument_id": instrument_id,
             "source_instrument_id": source_id,
@@ -222,24 +253,25 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "first_session_date": trading_date,
             "last_session_date": trading_date,
             "first_available_at_utc": (
-                session_start + dt.timedelta(minutes=missing_count + 1)
+                session_start + dt.timedelta(minutes=min(available_option_rows) + 1)
             ).astimezone(dt.timezone.utc),
             "last_available_at_utc": (
-                session_start + dt.timedelta(minutes=375)
+                session_start + dt.timedelta(minutes=max(available_option_rows) + 1)
             ).astimezone(dt.timezone.utc),
             "source_contract_multiplier": lot_size,
             "resolved_contract_multiplier": 65,
             "lot_size": lot_size,
             "multiplier_resolution": "source_preferred",
-            "observed_bar_count": 375 - missing_count,
-            "missing_bar_count": missing_count,
+            "observed_bar_count": bar_count - len(missing_option_rows),
+            "missing_bar_count": len(missing_option_rows),
             "sessions_observed": 1,
             "source_contract_metadata_sha256": metadata_sha,
         })
-        previous_option = Decimal("100")
-        for row_index in range(375):
-            close = Decimal("100") + Decimal((row_index % 10) - 5) * Decimal("3")
-            if row_index < missing_count:
+        option_base = Decimal(str(item.get("option_base", "100")))
+        previous_option = option_base
+        for row_index in range(bar_count):
+            close = option_base + Decimal((row_index % 10) - 5) * Decimal("3")
+            if row_index in missing_option_rows:
                 previous_option = close
                 continue
             row = _bar(
@@ -306,7 +338,7 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         if cursor.weekday() < 5 and cursor not in corpus_dates:
             synthetic_holidays.append(cursor.isoformat())
         cursor += dt.timedelta(days=1)
-    calendar_definition = {
+    calendar_definition = calendar_definition_override or {
         "timezone": "Asia/Kolkata",
         "exchange_time_zone": "Asia/Kolkata",
         "market_segments": {
@@ -319,8 +351,15 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         "late_opens": {},
         "holidays": synthetic_holidays,
     }
+    calendar_definition = json.loads(json.dumps(calendar_definition))
+    if integrity_profile_override == "wave-replay-special-sessions-v3":
+        calendar_definition.setdefault("special_sessions", {})
     calendar_definition_hash = sha256_bytes(
         (canonical_json(calendar_definition) + "\n").encode()
+    )
+    integrity_profile = (
+        integrity_profile_override
+        or "wave-replay-authoritative-sessions-v2"
     )
     expected_dates = [item["date"].isoformat() for item in corpus]
     underlying_coverage = {
@@ -333,12 +372,12 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         "definition": calendar_definition,
         "definition_sha256": calendar_definition_hash,
         "expected_session_dates": expected_dates,
-        "missing_underlying_session_dates": [],
-        "partial_underlying_session_dates": [],
+        "missing_underlying_session_dates": missing_underlying_dates,
+        "partial_underlying_session_dates": partial_underlying_dates,
         "observed_special_session_dates": [],
         "archive_only_special_session_dates": [],
-        "coverage_complete": True,
-        "equivalence_eligible": True,
+        "coverage_complete": not partial_underlying_dates and not missing_underlying_dates,
+        "equivalence_eligible": not partial_underlying_dates and not missing_underlying_dates,
         "missing_session_policy": "explicit_session_row_without_fabricated_prices",
         "calendar_scope": "weekly_market_hours_holidays_early_closes_late_opens",
         "reason": None,
@@ -353,16 +392,16 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "option_bars": len(option_rows),
             "contracts": len(contracts),
             "sessions": len(sessions),
-            "missing_underlying_bars": 0,
-            "missing_option_bars": 12,
+            "missing_underlying_bars": total_underlying_missing,
+            "missing_option_bars": total_option_missing,
             "source_resolved_multiplier_mismatches": 3,
             "option_session_outages": 0,
             "contract_session_outages": 0,
-            "missing_underlying_sessions": 0,
-            "partial_underlying_sessions": 0,
+            "missing_underlying_sessions": len(missing_underlying_dates),
+            "partial_underlying_sessions": len(partial_underlying_dates),
         },
         "option_session_outage_dates": [],
-        "underlying_session_outage_dates": [],
+        "underlying_session_outage_dates": missing_underlying_dates,
         "underlying_session_coverage": underlying_coverage,
         "contract_session_outages": [],
         "policies": {"option_forward_fill": "forbidden"},
@@ -405,7 +444,7 @@ def create_synthetic_dataset(root: str | Path) -> Path:
         "end_date": corpus[-1]["date"].isoformat(),
         "resolution_seconds": 60,
         "implementation_commit": "7dab0e1",
-        "integrity_profile": "wave-replay-authoritative-sessions-v2",
+        "integrity_profile": integrity_profile,
         "session_calendar_profile": "lean-market-hours-requested-range-v1",
         "session_calendar_definition_sha256": calendar_definition_hash,
         "config_source_commit": "d667bcb",
@@ -457,7 +496,7 @@ def create_synthetic_dataset(root: str | Path) -> Path:
             "end_date": corpus[-1]["date"].isoformat(),
         },
         "data_contract": {
-            "integrity_profile": "wave-replay-authoritative-sessions-v2",
+            "integrity_profile": integrity_profile,
             "session_calendar_profile": "lean-market-hours-requested-range-v1",
             "resolution_seconds": 60,
             "source_timestamp_kind": "bar_start",

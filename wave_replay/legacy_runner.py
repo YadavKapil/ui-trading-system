@@ -30,10 +30,22 @@ from .tracing import TraceRecorder
 class LegacyWaveRunner:
     """Cooperative oracle for one approved historical Wave scenario."""
 
-    def __init__(self, *, repository_root: str | Path, dataset: ReplayDataset, scenario: ReplayScenario) -> None:
+    def __init__(
+        self,
+        *,
+        repository_root: str | Path,
+        dataset: ReplayDataset,
+        scenario: ReplayScenario,
+        persistent_broker_state: dict[str, Any] | None = None,
+        continuous_context: dict[str, Any] | None = None,
+    ) -> None:
         self.repository_root = Path(repository_root).resolve()
         self.dataset = dataset
         self.scenario = scenario
+        self.persistent_broker_state = copy.deepcopy(persistent_broker_state)
+        self.continuous_context = dict(continuous_context or {})
+        self.final_broker_state: dict[str, Any] | None = None
+        self.equity_points: list[dict[str, Any]] = []
         self.end_at = (
             parse_timestamp(scenario.replay["end_at"])
             if scenario.replay.get("end_at")
@@ -77,6 +89,13 @@ class LegacyWaveRunner:
             ]),
             fee_schedule=fee_schedule,
         )
+        if self.persistent_broker_state is not None:
+            engine.restore_persistent_state(self.persistent_broker_state)
+        if self.continuous_context:
+            engine.open_exchange_session()
+        initial_day_cancellations = engine.day_cancellation_count
+        initial_post_close_rejections = engine.post_close_rejection_count
+        initial_roll_rejections = engine.roll_rejection_count
         fake_kite = FakeKite(engine, instruments=[instrument_row(contract, self.scenario)])
         ticker = FakeTicker(scheduler, tasks, trace)
         engine.bind_callback_dispatch(ticker.order_dispatch)
@@ -87,6 +106,8 @@ class LegacyWaveRunner:
         incomplete_at: set[dt.datetime] = set()
         missing_decisions: list[dict[str, Any]] = []
         unknown_data = {"value": False}
+        ticker_result_box: dict[str, Any] = {}
+        roll_result: dict[str, Any] = {}
 
         with ReplayBootstrap(
             repository_root=self.repository_root,
@@ -100,6 +121,38 @@ class LegacyWaveRunner:
             module = bootstrap.load_worker("we-1", [instrument_row(contract, self.scenario)])
             module_box["module"] = module
             configure_legacy_module(module, self.scenario, contract)
+            if self.continuous_context:
+                self._rehydrate_gtt_fallbacks(module, engine, contract, trace, scheduler.now)
+            session = self._session_row()
+            session_open = self._session_timestamp(session["session_open_ist"])
+            session_close = self._session_timestamp(session["session_close_ist"])
+            if self.continuous_context:
+                def authoritative_market_open() -> bool:
+                    now = module.get_ist_now()
+                    is_open = (
+                        now.date() == self.scenario.selected_date
+                        and session_open.time() <= now.time() <= session_close.time()
+                    )
+                    if now == session_close:
+                        trace.add(
+                            "AUTHORITATIVE_CLOSE_BOUNDARY_CHECK",
+                            at=now,
+                            actor="we-1",
+                            result={"is_open": is_open, "inclusive_close": True},
+                        )
+                    return is_open
+
+                module.is_market_open = authoritative_market_open
+                trace.add(
+                    "AUTHORITATIVE_SESSION_CALENDAR_BOUND",
+                    at=scheduler.now,
+                    actor="we-1",
+                    details={
+                        "session_open": session_open.isoformat(),
+                        "session_close": session_close.isoformat(),
+                        "special_session": bool(session.get("special_session", False)),
+                    },
+                )
             staged_root = Path(module.__file__).parent
             (staged_root / "delta_limits.json").write_text(
                 json.dumps(self.scenario.wave_settings["delta_limits"], indent=2, sort_keys=True),
@@ -132,6 +185,12 @@ class LegacyWaveRunner:
                         instrument_id=missing_id,
                         timestamp=bar.bar_end.isoformat(),
                     )
+                    if self.continuous_context:
+                        decision = {
+                            **decision,
+                            "timestamp": bar.bar_end.isoformat(),
+                            "instrument_id": missing_id,
+                        }
                     missing_decisions.append(decision)
                     if decision["action"] == "mark_unknown":
                         unknown_data["value"] = True
@@ -152,11 +211,14 @@ class LegacyWaveRunner:
                     last_price=option_bar.close,
                     instrument_token=contract.instrument_token,
                 )
+                if self.continuous_context and not started["value"]:
+                    engine.mark_to_market(contract.wave_trading_symbol, option_bar.close)
                 if started["value"]:
                     engine.evaluate_close_bar(
                         option_bar,
                         fill_price_mode=self.scenario.replay["fill_price_mode"],
                     )
+                self._record_equity_point(engine, option_bar, unknown=False)
 
             feed.subscribe(on_bar)
             trace.add(
@@ -204,16 +266,68 @@ class LegacyWaveRunner:
                         "contract_metadata_sha256": contract.metadata_sha256,
                     },
                     "initial_state": {
-                        "cash": str(self.scenario.initial_cash),
-                        "positions": [],
+                        "cash": str(engine.cash),
+                        "positions": (
+                            []
+                            if self.persistent_broker_state is None
+                            else copy.deepcopy(engine.positions_by_symbol)
+                        ),
                         "regular_orders": [],
-                        "gtts": [],
+                        "gtts": (
+                            []
+                            if self.persistent_broker_state is None
+                            else engine.get_gtts()
+                        ),
                     },
                     "replay": self.scenario.replay,
                 },
                 state_after=state_hash(self._legacy_state(module)),
             )
             feed.schedule(day_bars)
+
+            def exchange_close() -> None:
+                engine.close_exchange_session()
+
+            if self.continuous_context:
+                scheduler.schedule_at(
+                    session_close,
+                    exchange_close,
+                    priority=90,
+                    event_id="exchange-day-close",
+                )
+            if self.continuous_context.get("roll_before_next_session"):
+                roll_at = session_close - dt.timedelta(minutes=1)
+                roll_bar = self._latest_synchronized_option_bar(contract, roll_at)
+
+                def roll_position() -> None:
+                    engine.cancel_open_day_orders(reason="simulator_contract_roll")
+                    for trigger in list(engine.gtts_by_id.values()):
+                        if trigger.status == "active" and trigger.symbol == contract.wave_trading_symbol:
+                            engine.delete_gtt(trigger.trigger_id)
+                    before_realized = engine.realized_pnl
+                    before_fees = engine.fees_paid
+                    order_id = engine.liquidate_position(
+                        contract.wave_trading_symbol,
+                        price=roll_bar.close,
+                        reason="next_session_dte_below_5",
+                    )
+                    engine.block_symbol_until_session_end(contract.wave_trading_symbol)
+                    roll_result.update({
+                        "at": scheduler.now.isoformat(),
+                        "order_id": order_id,
+                        "price": str(roll_bar.close),
+                        "quote_at": roll_bar.bar_end.isoformat(),
+                        "realized_pnl": str(engine.realized_pnl - before_realized),
+                        "fees": str(engine.fees_paid - before_fees),
+                    })
+                    self._record_equity_snapshot(engine, scheduler.now, unknown=False)
+
+                scheduler.schedule_at(
+                    roll_at,
+                    roll_position,
+                    priority=18,
+                    event_id="simulator-contract-roll",
+                )
 
             def startup() -> None:
                 started["value"] = True
@@ -223,6 +337,21 @@ class LegacyWaveRunner:
                     actor="we-1",
                     details={"cool_off_mode": "disabled", "production_seconds": 10},
                 )
+                if engine.active_gtt_count(contract.wave_trading_symbol):
+                    original_place_duo = module.place_duo_order
+
+                    def guarded_place_duo(*args, **kwargs):
+                        if engine.active_gtt_count(contract.wave_trading_symbol):
+                            trace.add(
+                                "CONTINUOUS_DUO_SKIPPED_PENDING_GTT",
+                                at=scheduler.now,
+                                actor=contract.wave_trading_symbol,
+                                details={"active_gtts": engine.active_gtt_count(contract.wave_trading_symbol)},
+                            )
+                            return {}
+                        return original_place_duo(*args, **kwargs)
+
+                    module.place_duo_order = guarded_place_duo
                 assert bootstrap.loader is not None
                 ticker_result = bootstrap.loader.execute_ticker(
                     "we-1",
@@ -238,6 +367,9 @@ class LegacyWaveRunner:
                     ],
                     max_poll_cycles=200,
                 )
+                if self.continuous_context:
+                    ticker_result["completed_at"] = scheduler.now.isoformat()
+                ticker_result_box.update(ticker_result)
                 trace.add(
                     "TICKER_ENTRYPOINT_COMPLETED",
                     at=scheduler.now,
@@ -280,6 +412,13 @@ class LegacyWaveRunner:
                 raise RuntimeError(
                     f"Unconsumed broker actions: {sorted(expected_actions - consumed_script)}"
                 )
+            if self.continuous_context:
+                self._record_equity_snapshot(
+                    engine,
+                    scheduler.now,
+                    unknown=unknown_data["value"],
+                    reason="session_final_post_events",
+                )
             report = self._report(
                 engine,
                 trace,
@@ -289,10 +428,136 @@ class LegacyWaveRunner:
                 source_hashes=source_hashes,
             )
             report["data_quality"]["missing_quote_decisions"] = missing_decisions
+            if self.continuous_context:
+                report["session_end"].update({
+                    "snapshot_type": "continuous_day_boundary_after_day_cancel_and_worker_exit",
+                    "day_order_cancellation_modeled": True,
+                    "day_orders_cancelled": engine.day_cancellation_count - initial_day_cancellations,
+                    "post_close_rejections": (
+                        engine.post_close_rejection_count - initial_post_close_rejections
+                    ),
+                    "roll_rejections": engine.roll_rejection_count - initial_roll_rejections,
+                    "worker_lifecycle": ticker_result_box,
+                    "roll": roll_result or None,
+                    "authoritative_session_open": session_open.isoformat(),
+                    "authoritative_session_close": session_close.isoformat(),
+                    "first_post_close_poll_at": ticker_result_box.get("completed_at"),
+                    "subsequent_shutdown_poll_modeled": True,
+                })
+                report["equity_curve"] = list(self.equity_points)
+                self.final_broker_state = engine.export_persistent_state()
             report_path = bootstrap.paths.output / "report.json"
             report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
         report["trace_digest"] = trace.digest()
         return report, trace
+
+    def _session_row(self) -> dict[str, Any]:
+        return next(
+            row
+            for row in self.dataset.sessions
+            if str(row["session_date"]) == self.scenario.selected_date.isoformat()
+        )
+
+    @staticmethod
+    def _session_timestamp(value: Any) -> dt.datetime:
+        return value if isinstance(value, dt.datetime) else dt.datetime.fromisoformat(str(value))
+
+    @staticmethod
+    def _quote_key_for_contract(contract: Contract) -> str:
+        symbol = str(contract.wave_trading_symbol)
+        return symbol if ":" in symbol else f"{contract.exchange}:{symbol}"
+
+    def _record_equity_point(self, engine: BrokerEngine, option_bar, *, unknown: bool) -> None:
+        self._record_equity_snapshot(engine, option_bar.bar_end, unknown=unknown)
+
+    def _record_equity_snapshot(
+        self,
+        engine: BrokerEngine,
+        at: dt.datetime,
+        *,
+        unknown: bool,
+        reason: str = "completed_option_minute",
+    ) -> None:
+        equity = None if unknown else engine.current_equity()
+        unrealized = sum(
+            Decimal(str(position.get("m2m", 0)))
+            for position in engine.positions_by_symbol.values()
+        )
+        self.equity_points.append({
+            "at": at.isoformat(),
+            "cash": str(engine.cash),
+            "equity": None if equity is None else str(equity),
+            "realized_pnl": str(engine.realized_pnl),
+            "unrealized_pnl": None if unknown else str(unrealized),
+            "fees": str(engine.fees_paid),
+            "reason": reason,
+        })
+
+    def _latest_synchronized_option_bar(
+        self,
+        contract: Contract,
+        at: dt.datetime,
+    ):
+        underlying_ends = {
+            bar.bar_end
+            for bar in self.dataset.underlying_bars
+            if bar.session_date == self.scenario.selected_date
+            and not bar.missing_bar
+            and bar.bar_end <= at
+        }
+        return max(
+            (
+                bar
+                for bar in self.dataset.option_bars
+                if bar.instrument_id == contract.instrument_id
+                and bar.session_date == self.scenario.selected_date
+                and not bar.missing_bar
+                and bar.bar_end in underlying_ends
+            ),
+            key=lambda bar: bar.bar_end,
+        )
+
+    @staticmethod
+    def _rehydrate_gtt_fallbacks(
+        module,
+        engine: BrokerEngine,
+        contract: Contract,
+        trace: TraceRecorder,
+        at: dt.datetime,
+    ) -> None:
+        active = [
+            trigger
+            for trigger in engine.gtts_by_id.values()
+            if trigger.status == "active"
+            and trigger.symbol == contract.wave_trading_symbol
+        ]
+        tags = [trigger.tag for trigger in active if trigger.tag]
+        for trigger in active:
+            if not trigger.tag:
+                raise RuntimeError(f"Active GTT {trigger.trigger_id} has no reconciliation tag")
+            template = trigger.orders[0]
+            siblings = [tag for tag in tags if tag != trigger.tag]
+            module.pending_gtt_fallbacks[trigger.tag] = {
+                "trigger_id": trigger.trigger_id,
+                "symbol": trigger.symbol,
+                "exchange": trigger.exchange,
+                "product": template.get("product", "NRML"),
+                "quantity": int(template["quantity"]),
+                "transaction_type": str(template["transaction_type"]).upper(),
+                "price": float(template.get("price", trigger.trigger_values[0])),
+                "associated_regular_order_id": -1,
+                "associated_gtt_tag": siblings[0] if len(siblings) == 1 else None,
+            }
+        if active:
+            trace.add(
+                "CONTINUOUS_GTT_REHYDRATED",
+                at=at,
+                actor=contract.wave_trading_symbol,
+                details={
+                    "trigger_ids": [trigger.trigger_id for trigger in active],
+                    "tags": tags,
+                },
+            )
 
     def _validate_frozen_selection(self) -> None:
         contract = self.dataset.contract_for_instrument(self.scenario.instrument_id)
@@ -320,15 +585,24 @@ class LegacyWaveRunner:
         mismatches = [name for name, (actual, wanted) in expected.items() if actual != wanted]
         if mismatches:
             raise ValueError(f"Scenario frozen metadata mismatch: {', '.join(mismatches)}")
-        first_underlying = min(
-            (
-                bar
-                for bar in self.dataset.underlying_bars
-                if bar.underlying == "NIFTY"
-                and bar.bar_end.date() == self.scenario.selected_date
-                and not bar.missing_bar
-            ),
-            key=lambda bar: bar.bar_end,
+        underlying_candidates = [
+            bar
+            for bar in self.dataset.underlying_bars
+            if bar.underlying == "NIFTY"
+            and bar.bar_end.date() == self.scenario.selected_date
+            and not bar.missing_bar
+        ]
+        first_underlying = (
+            next(
+                (
+                    bar
+                    for bar in underlying_candidates
+                    if bar.bar_end == self.scenario.first_underlying_close_at
+                ),
+                None,
+            )
+            if self.continuous_context
+            else min(underlying_candidates, key=lambda bar: bar.bar_end)
         )
         option = next(
             (
@@ -341,7 +615,8 @@ class LegacyWaveRunner:
             None,
         )
         if (
-            first_underlying.bar_end != self.scenario.first_underlying_close_at
+            first_underlying is None
+            or first_underlying.bar_end != self.scenario.first_underlying_close_at
             or first_underlying.close != self.scenario.first_underlying_close
             or option is None
             or option.close != self.scenario.option_close_at_selection
@@ -351,6 +626,11 @@ class LegacyWaveRunner:
     def _scenario_bars(self, contract: Contract) -> list[Any]:
         bars = self.dataset.underlying_bars_with_missing(self.scenario.selected_date)
         option_bars = self.dataset.option_bars_with_missing(contract, self.scenario.selected_date)
+        replay_start = self.continuous_context.get("session_replay_start_at")
+        if replay_start:
+            start_at = parse_timestamp(replay_start)
+            bars = [bar for bar in bars if bar.bar_end >= start_at]
+            option_bars = [bar for bar in option_bars if bar.bar_end >= start_at]
         if self.end_at:
             bars = [bar for bar in bars if bar.bar_end <= self.end_at]
             option_bars = [bar for bar in option_bars if bar.bar_end <= self.end_at]
@@ -413,6 +693,24 @@ class LegacyWaveRunner:
                     engine.trigger_gtt(
                         trigger_id,
                         immediate_complete=bool(event.get("immediate_complete", False)),
+                    )
+                elif kind == "gtt_create":
+                    side = str(event.get("side", "BUY")).upper()
+                    price = Decimal(str(event.get("price", self.scenario.option_close_at_selection)))
+                    engine.place_gtt(
+                        trigger_type="single",
+                        tradingsymbol=self.scenario.symbol,
+                        exchange="NFO",
+                        trigger_values=[float(price)],
+                        last_price=float(price),
+                        orders=[{
+                            "transaction_type": side,
+                            "quantity": self.scenario.lot_size,
+                            "product": "NRML",
+                            "order_type": "LIMIT",
+                            "price": float(price),
+                            "tag": str(event.get("tag", f"GTT_{side[0]}_CONTINUOUS")),
+                        }],
                     )
                 elif kind == "partial_fill":
                     order_id = self._resolve_order_id(engine, event.get("order_id", "first_open"), event.get("side"))
