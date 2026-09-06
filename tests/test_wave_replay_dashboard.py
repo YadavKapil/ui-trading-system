@@ -190,6 +190,27 @@ def test_dashboard_generator_is_self_contained_and_preserves_event_markers(tmp_p
     assert {"time": switch_time} in payload["option"]
 
 
+def test_final_dashboard_label_is_not_provisional(tmp_path):
+    report = tmp_path / "report.json"
+    trace = tmp_path / "trace.jsonl"
+    asset = tmp_path / "charts.js"
+    output = tmp_path / "dashboard.html"
+    report.write_text(json.dumps(_report()), encoding="utf-8")
+    trace.write_text("", encoding="utf-8")
+    asset.write_text("window.LightweightCharts={};", encoding="utf-8")
+    generate_continuous_dashboard(
+        report_path=report,
+        trace_path=trace,
+        output_path=output,
+        chart_asset_path=asset,
+        simulator_commit="4d45550",
+        title="Wave Full Result",
+    )
+    rendered = output.read_text(encoding="utf-8")
+    assert "DETERMINISTIC FINAL · 1 SESSIONS" in rendered
+    assert "final deterministic full-period result" in rendered
+
+
 def test_downsample_retains_first_last_and_extrema():
     points = [{"time": index, "value": float(index % 11)} for index in range(100)]
     points[20] = {"time": 20, "value": 99.0}

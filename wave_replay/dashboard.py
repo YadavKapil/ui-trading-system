@@ -581,6 +581,17 @@ def _render_html(
         "range": report["requested_range"],
     }
     session_count = len(report["sessions"])
+    provisional = "provisional" in title.lower()
+    badge = (
+        f"PROVISIONAL · {session_count} SESSIONS"
+        if provisional
+        else f"DETERMINISTIC FINAL · {session_count} SESSIONS"
+    )
+    disclosure = (
+        "This provisional prefix is not the final 464-session result."
+        if provisional
+        else "Both replay passes were byte-identical; this is the final deterministic full-period result."
+    )
     data_json = canonical_json({"charts": payload}).replace("</", "<\\/")
     return f"""<!doctype html>
 <html lang="en">
@@ -602,7 +613,7 @@ h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0 0 10px}} .sub,.meta,.n
 <script>{chart_source}</script>
 </head>
 <body><main class="wrap">
-<div class="top"><div><h1>{html.escape(title)}</h1><div class="sub">Deterministic close-only Wave replay · IST · offline result</div></div><div class="badge">PROVISIONAL · {session_count} SESSIONS</div></div>
+<div class="top"><div><h1>{html.escape(title)}</h1><div class="sub">Deterministic close-only Wave replay · IST · offline result</div></div><div class="badge">{badge}</div></div>
 <section class="grid">
 {_metric_card("Boundary equity", account["ending_equity"], "INR")}
 {_metric_card("Boundary P&L", account["pnl"], "INR")}
@@ -626,7 +637,7 @@ h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0 0 10px}} .sub,.meta,.n
 <section class="panel"><h2>Absolute inventory after fills</h2><div id="inventory-chart" class="small-chart"></div></section>
 <section class="panel"><h2>Boundary MTM vs forced-close sensitivity</h2>{_comparison_table(report)}</section></div>
 <div class="tables"><section class="panel"><h2>Annual summary</h2>{_period_table(report["summaries"]["annual"])}</section><section class="panel"><h2>Monthly summary</h2>{_period_table(report["summaries"]["monthly"])}</section></div>
-<section class="panel meta"><h2>Reproducibility</h2><div>Collection: <code>{html.escape(str(metadata["collection_id"]))}</code></div><div>Collection SHA: <code>{html.escape(str(metadata["collection_sha256"]))}</code></div><div>Simulator: <code>{html.escape(str(metadata["simulator_commit"]))}</code></div><div>Trace digest: <code>{html.escape(str(metadata["trace_digest"]))}</code></div><div>Report hash: <code>{html.escape(str(metadata["report_hash"]))}</code></div><div>Range: {html.escape(str(metadata["range"]["start"]))} → {html.escape(str(metadata["range"]["end"]))}</div><p class="note">Offline self-contained report. Continuous lines are deterministically min/max downsampled; every fill, selection, switch, roll, missing marker, and session boundary is retained. Prices and timestamps use completed-minute availability in IST. This provisional prefix is not the final 464-session result.</p></section>
+<section class="panel meta"><h2>Reproducibility</h2><div>Collection: <code>{html.escape(str(metadata["collection_id"]))}</code></div><div>Collection SHA: <code>{html.escape(str(metadata["collection_sha256"]))}</code></div><div>Simulator: <code>{html.escape(str(metadata["simulator_commit"]))}</code></div><div>Trace digest: <code>{html.escape(str(metadata["trace_digest"]))}</code></div><div>Report hash: <code>{html.escape(str(metadata["report_hash"]))}</code></div><div>Range: {html.escape(str(metadata["range"]["start"]))} → {html.escape(str(metadata["range"]["end"]))}</div><p class="note">Offline self-contained report. Continuous lines are deterministically min/max downsampled; every fill, selection, switch, roll, missing marker, and session boundary is retained. Prices and timestamps use completed-minute availability in IST. {disclosure}</p></section>
 </main>
 <script>
 const DATA={data_json};
