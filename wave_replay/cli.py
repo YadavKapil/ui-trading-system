@@ -22,6 +22,7 @@ from .continuous import (
     ReplayDatasetCollection,
 )
 from .datasets import ReplayDataset
+from .dashboard import generate_continuous_dashboard
 from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
 from .legacy_runner import LegacyWaveRunner
@@ -68,6 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
     continuous.add_argument("--wave-config", default="wave_extractor_config.json")
     continuous.add_argument("--delta-limits", default="delta_limits.json")
     continuous.add_argument("--config")
+
+    dashboard = subparsers.add_parser("render-continuous-dashboard")
+    dashboard.add_argument("--report", required=True)
+    dashboard.add_argument("--trace", required=True)
+    dashboard.add_argument("--output", required=True)
+    dashboard.add_argument(
+        "--chart-asset",
+        default="static/vendor/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js",
+    )
+    dashboard.add_argument(
+        "--title",
+        default="Wave Continuous Replay — Provisional Result",
+    )
+    dashboard.add_argument("--simulator-commit", required=True)
+    dashboard.add_argument("--max-points", type=int, default=8_000)
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--expected", required=True)
@@ -132,6 +148,18 @@ def main(argv: list[str] | None = None) -> int:
         return _run_replay(args)
     if args.command == "replay-continuous":
         return _run_continuous_replay(args)
+    if args.command == "render-continuous-dashboard":
+        result = generate_continuous_dashboard(
+            report_path=args.report,
+            trace_path=args.trace,
+            output_path=args.output,
+            chart_asset_path=args.chart_asset,
+            simulator_commit=args.simulator_commit,
+            title=args.title,
+            max_points=args.max_points,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
     if args.command == "compare":
         difference = compare_jsonl(args.expected, args.actual)
         print(json.dumps(difference.__dict__, indent=2, sort_keys=True))
