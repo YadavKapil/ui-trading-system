@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import html
 import json
 from decimal import Decimal
@@ -64,6 +65,167 @@ def generate_continuous_dashboard(
     }
 
 
+def generate_provisional_trace_dashboard(
+    *,
+    trace_path: str | Path,
+    collection_manifest_path: str | Path,
+    output_path: str | Path,
+    chart_asset_path: str | Path,
+    simulator_commit: str,
+    title: str,
+    max_points: int = DEFAULT_MAX_POINTS,
+) -> dict[str, Any]:
+    if max_points < 4:
+        raise ValueError("max_points must be at least 4")
+    trace_path = Path(trace_path)
+    manifest = json.loads(Path(collection_manifest_path).read_text(encoding="utf-8"))
+    events = _collect_provisional_events(trace_path)
+    required_times = {
+        marker["time"]
+        for name in ("fills", "selections", "lifecycle", "missing", "boundaries")
+        for marker in events["markers"][name]
+    }
+    trace_data = _sample_trace_bars(
+        trace_path,
+        counts=events["bar_counts"],
+        max_points=max_points,
+        required_times=required_times,
+    )
+    option = list(trace_data["option"])
+    existing = {point["time"] for point in option}
+    option.extend(
+        {"time": timestamp}
+        for timestamp in sorted(required_times - existing)
+    )
+    payload = {
+        "underlying": trace_data["underlying"],
+        "option": _consolidate(option),
+        "inventory": _consolidate(_inventory_points(events["fills"])),
+        "markers": events["markers"],
+    }
+    chart_source = Path(chart_asset_path).read_text(encoding="utf-8")
+    rendered = _render_provisional_html(
+        title=title,
+        manifest=manifest,
+        payload=payload,
+        simulator_commit=simulator_commit,
+        trace_sha256=events["trace_sha256"],
+        sessions=events["sessions"],
+    )
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(rendered.replace("/*__CHART_SOURCE__*/", chart_source), encoding="utf-8")
+    return {
+        "output": str(output_path.resolve()),
+        "size_bytes": output_path.stat().st_size,
+        "trace_sha256": events["trace_sha256"],
+        "sessions": len(events["sessions"]),
+        "underlying_points": len(payload["underlying"]),
+        "option_points": len(payload["option"]),
+        "fill_markers": len(events["markers"]["fills"]),
+        "selection_markers": len(events["markers"]["selections"]),
+        "lifecycle_markers": len(events["markers"]["lifecycle"]),
+        "missing_markers": len(events["markers"]["missing"]),
+        "session_boundaries": len(events["markers"]["boundaries"]),
+    }
+
+
+def _collect_provisional_events(path: Path) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    order_symbols: dict[tuple[str, str], str] = {}
+    fills = []
+    selections = []
+    lifecycle = []
+    missing = []
+    boundaries = []
+    sessions: set[str] = set()
+    bar_counts = {"underlying": 0, "option": 0}
+    with path.open("rb") as handle:
+        for raw in handle:
+            digest.update(raw)
+            event = json.loads(raw)
+            session = event.get("continuous_session_date")
+            if session:
+                sessions.add(session)
+            kind = event.get("kind")
+            details = event.get("details", {})
+            if kind == "BAR_AVAILABLE":
+                bar_counts[
+                    "underlying" if details.get("lean_symbol") == "NIFTY" else "option"
+                ] += 1
+            elif kind == "BROKER_ORDER_TRANSITION":
+                order_symbols[(session, str(details.get("order_id")))] = str(
+                    details.get("tradingsymbol", "")
+                )
+            elif kind == "BROKER_FILL":
+                fills.append({
+                    "time": _epoch(event["at"]),
+                    "at": event["at"],
+                    "session": session,
+                    "order_id": str(details["order_id"]),
+                    "side": details["side"],
+                    "quantity": int(details["quantity"]),
+                    "price": details["price"],
+                })
+            elif kind == "TRACE_HEADER":
+                contract = details.get("contract", {})
+                selections.append({
+                    "time": _epoch(event["at"]),
+                    "position": "aboveBar",
+                    "color": "#22c55e",
+                    "shape": "circle",
+                    "text": f"START · {contract.get('wave_trading_symbol', '')}",
+                })
+            elif kind == "SIMULATOR_ROLL_LIQUIDATION":
+                lifecycle.append({
+                    "time": _epoch(event["at"]),
+                    "position": "aboveBar",
+                    "color": "#e879f9",
+                    "shape": "square",
+                    "text": f"SWITCH/ROLL · {event.get('actor', '')}",
+                })
+            elif kind == "MISSING_QUOTE_POLICY":
+                missing.append({
+                    "time": _epoch(event["at"]),
+                    "position": "belowBar",
+                    "color": "#ef4444",
+                    "shape": "circle",
+                    "text": "Missing · skip",
+                })
+            elif kind == "EXCHANGE_SESSION_CLOSE":
+                boundaries.append({
+                    "time": _epoch(event["at"]),
+                    "position": "belowBar",
+                    "color": "#475569",
+                    "shape": "square",
+                    "text": session,
+                })
+    fill_markers = []
+    for fill in fills:
+        symbol = order_symbols.get((fill["session"], fill["order_id"]), "Wave option")
+        fill["symbol"] = symbol
+        fill_markers.append({
+            "time": fill["time"],
+            "position": "belowBar" if fill["side"] == "BUY" else "aboveBar",
+            "color": "#4da3ff" if fill["side"] == "BUY" else "#f59e0b",
+            "shape": "arrowUp" if fill["side"] == "BUY" else "arrowDown",
+            "text": f"{fill['side'][0]} {fill['quantity']} · {symbol}",
+        })
+    return {
+        "trace_sha256": digest.hexdigest(),
+        "sessions": sorted(sessions),
+        "bar_counts": bar_counts,
+        "fills": fills,
+        "markers": {
+            "fills": fill_markers,
+            "selections": selections,
+            "lifecycle": lifecycle,
+            "missing": missing,
+            "boundaries": boundaries,
+        },
+    }
+
+
 def _collect_trace_data(
     path: Path,
     *,
@@ -89,6 +251,25 @@ def _collect_trace_data(
                     "session": event["continuous_session_date"],
                 })
     required_times = required_times | {item["time"] for item in boundaries}
+    sampled = _sample_trace_bars(
+        path,
+        counts=counts,
+        max_points=max_points,
+        required_times=required_times,
+    )
+    return {
+        **sampled,
+        "boundaries": boundaries,
+    }
+
+
+def _sample_trace_bars(
+    path: Path,
+    *,
+    counts: dict[str, int],
+    max_points: int,
+    required_times: set[int],
+) -> dict[str, list[dict[str, Any]]]:
     samplers = {
         name: _StreamingMinMaxSampler(
             total=count,
@@ -113,7 +294,6 @@ def _collect_trace_data(
     return {
         "underlying": samplers["underlying"].finish(),
         "option": samplers["option"].finish(),
-        "boundaries": boundaries,
     }
 
 
@@ -460,6 +640,41 @@ const markerGroups=DATA.charts.markers; function refreshMarkers(){{option.setMar
 const eq=chart('equity-chart',350); const eqs=eq.addLineSeries({{color:'#22c55e',lineWidth:2,title:'Equity'}}); eqs.setData(DATA.charts.equity); const dds=eq.addHistogramSeries({{color:'#7f1d1d',priceScaleId:'left',title:'Drawdown'}}); dds.setData(DATA.charts.drawdown); eq.timeScale().fitContent();
 const pnl=chart('pnl-chart',350); pnl.addLineSeries({{color:'#4da3ff',title:'Realized'}}).setData(DATA.charts.realized); pnl.addLineSeries({{color:'#f59e0b',title:'Unrealized'}}).setData(DATA.charts.unrealized); pnl.addLineSeries({{color:'#a78bfa',title:'Fees'}}).setData(DATA.charts.fees); pnl.timeScale().fitContent();
 const inv=chart('inventory-chart',250); inv.addLineSeries({{color:'#e879f9',lineWidth:2,title:'Absolute quantity'}}).setData(DATA.charts.inventory); inv.timeScale().fitContent();
+</script></body></html>"""
+
+
+def _render_provisional_html(
+    *,
+    title: str,
+    manifest: dict[str, Any],
+    payload: dict[str, Any],
+    simulator_commit: str,
+    trace_sha256: str,
+    sessions: list[str],
+) -> str:
+    data_json = canonical_json(payload).replace("</", "<\\/")
+    marker_counts = {
+        name: len(payload["markers"][name])
+        for name in ("fills", "selections", "lifecycle", "missing", "boundaries")
+    }
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{html.escape(title)}</title><style>
+:root{{--bg:#0b0e13;--panel:#121720;--line:#2a3340;--text:#e7edf5;--muted:#8b98a8}}*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 Segoe UI,Arial,sans-serif}}main{{max-width:1540px;margin:auto;padding:18px}}h1{{font-size:22px;margin:0}}h2{{font-size:15px;margin:0 0 8px}}.top{{display:flex;justify-content:space-between;gap:16px}}.badge{{background:#2b160b;border:1px solid #9a4e16;color:#fb923c;border-radius:6px;padding:6px 10px;font-weight:700}}.muted{{color:var(--muted)}}.grid{{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:14px 0}}.card,.panel{{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px}}.label{{font-size:10px;color:var(--muted);text-transform:uppercase}}.value{{font-size:19px;font-weight:700}}.chart{{height:430px}}.small{{height:250px}}.panel{{margin-bottom:10px}}.legend,.controls{{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:7px 0}}code{{color:#bdc9d8;word-break:break-all}}.warning{{border-left:3px solid #f97316;padding-left:10px}}@media(max-width:850px){{.grid{{grid-template-columns:repeat(2,1fr)}}.chart{{height:320px}}}}
+</style><script>/*__CHART_SOURCE__*/</script></head><body><main>
+<div class="top"><div><h1>{html.escape(title)}</h1><div class="muted">Trace-only full-period view · deterministic IST · economics pending pass 2</div></div><div class="badge">PROVISIONAL — PASS 2 VERIFICATION PENDING</div></div>
+<div class="grid">{_metric_card("Sessions", len(sessions), "")}{_metric_card("Fills", marker_counts["fills"], "")}{_metric_card("Selections", marker_counts["selections"], "")}{_metric_card("Switches / rolls", marker_counts["lifecycle"], "")}{_metric_card("Missing markers", marker_counts["missing"], "")}{_metric_card("Boundaries", marker_counts["boundaries"], "")}</div>
+<section class="panel"><h2>NIFTY and selected option path</h2><div class="legend">Blue: NIFTY · Amber: option · Blue arrows: BUY · Amber arrows: SELL · Green: worker/selection · Purple: switch/roll · Red: missing</div><div class="controls"><label><input id="fills" type="checkbox" checked> fills</label><label><input id="selections" type="checkbox" checked> selections</label><label><input id="lifecycle" type="checkbox" checked> switch/roll</label><label><input id="missing" type="checkbox" checked> missing</label><label><input id="boundaries" type="checkbox"> boundaries</label></div><div id="market" class="chart"></div></section>
+<section class="panel"><h2>Absolute inventory after fills</h2><div id="inventory" class="small"></div></section>
+<section class="panel warning"><h2>Pass-1 disclosure</h2><p>Generated from pass 1 while pass 2 remains active. Equity, drawdown, realized/unrealized P&amp;L, fees, monthly/yearly summaries, final boundary MTM, and forced-close sensitivity are intentionally withheld until the final deterministic report exists.</p>
+<div>Collection: <code>{html.escape(str(manifest["collection_id"]))}</code></div><div>Collection SHA: <code>{html.escape(str(manifest["collection_sha256"]))}</code></div><div>Simulator: <code>{html.escape(simulator_commit)}</code></div><div>Pass-1 trace SHA256: <code>{trace_sha256}</code></div><div>Range: {html.escape(str(manifest["start_date"]))} → {html.escape(str(manifest["end_date"]))}</div><p class="muted">Offline, self-contained, no broker/network calls. Non-event price series are bounded min/max samples; all pass-1 fill, selection, lifecycle, missing, and boundary markers are retained.</p></section>
+</main><script>
+const DATA={data_json},LC=LightweightCharts,ist=t=>new Intl.DateTimeFormat('en-IN',{{timeZone:'Asia/Kolkata',dateStyle:'medium',timeStyle:'short'}}).format(new Date(t*1000));
+const base={{layout:{{background:{{type:'solid',color:'#121720'}},textColor:'#9aa7b8'}},grid:{{vertLines:{{color:'#1e2631'}},horzLines:{{color:'#1e2631'}}}},crosshair:{{mode:LC.CrosshairMode.Normal}},timeScale:{{timeVisible:true,tickMarkFormatter:ist}},handleScroll:{{mouseWheel:true,pressedMouseMove:true}},handleScale:{{mouseWheel:true,pinch:true}},localization:{{timeFormatter:ist}}}};
+function chart(id,h){{const c=LC.createChart(document.getElementById(id),{{...base,height:h}});new ResizeObserver(()=>c.applyOptions({{width:document.getElementById(id).clientWidth}})).observe(document.getElementById(id));return c}}
+const c=chart('market',430),n=c.addLineSeries({{color:'#4da3ff',lineWidth:2,title:'NIFTY'}}),o=c.addLineSeries({{color:'#f59e0b',lineWidth:2,title:'Selected option',priceScaleId:'left'}});n.setData(DATA.underlying);o.setData(DATA.option);
+function marks(){{o.setMarkers(['fills','selections','lifecycle','missing'].flatMap(k=>document.getElementById(k).checked?DATA.markers[k]:[]).sort((a,b)=>a.time-b.time));n.setMarkers(document.getElementById('boundaries').checked?DATA.markers.boundaries:[])}}document.querySelectorAll('.controls input').forEach(x=>x.addEventListener('change',marks));marks();c.timeScale().fitContent();
+const i=chart('inventory',250);i.addLineSeries({{color:'#e879f9',lineWidth:2,title:'Absolute quantity'}}).setData(DATA.inventory);i.timeScale().fitContent();
 </script></body></html>"""
 
 

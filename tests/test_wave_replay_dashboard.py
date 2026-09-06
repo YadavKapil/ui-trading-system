@@ -6,6 +6,7 @@ from wave_replay.dashboard import (
     _collect_trace_data,
     _downsample,
     generate_continuous_dashboard,
+    generate_provisional_trace_dashboard,
 )
 
 
@@ -241,3 +242,77 @@ def test_downsample_rejects_impossible_point_budget():
     trace = Path(__file__).parent / "fixtures" / "wave_replay" / "goldens" / "nifty_range_startup.jsonl"
     with pytest.raises(ValueError, match="fewer than four slots"):
         _collect_trace_data(trace, max_points=4, required_times={1})
+
+
+def test_provisional_trace_dashboard_does_not_require_final_report(tmp_path):
+    trace = tmp_path / "trace.jsonl"
+    manifest = tmp_path / "collection_manifest.json"
+    asset = tmp_path / "charts.js"
+    output = tmp_path / "provisional.html"
+    events = [
+        {
+            "kind": "BAR_AVAILABLE",
+            "at": "2024-09-19T09:16:00+05:30",
+            "continuous_session_date": "2024-09-19",
+            "details": {
+                "close": "25000",
+                "lean_symbol": "NIFTY",
+                "wave_trading_symbol": "NSE:NIFTY 50",
+            },
+        },
+        {
+            "kind": "TRACE_HEADER",
+            "at": "2024-09-19T09:16:00+05:30",
+            "continuous_session_date": "2024-09-19",
+            "details": {"contract": {"wave_trading_symbol": "NIFTYTESTCE"}},
+        },
+        {
+            "kind": "BROKER_FILL",
+            "at": "2024-09-19T09:17:00+05:30",
+            "continuous_session_date": "2024-09-19",
+            "details": {
+                "order_id": "1",
+                "side": "BUY",
+                "quantity": 25,
+                "price": "50",
+            },
+        },
+        {
+            "kind": "BROKER_ORDER_TRANSITION",
+            "at": "2024-09-19T09:17:00+05:30",
+            "continuous_session_date": "2024-09-19",
+            "details": {
+                "order_id": "1",
+                "tradingsymbol": "NIFTYTESTCE",
+            },
+        },
+    ]
+    trace.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps({
+            "collection_id": "wave-collection-v1-full",
+            "collection_sha256": "full-hash",
+            "start_date": "2024-09-19",
+            "end_date": "2026-08-04",
+        }),
+        encoding="utf-8",
+    )
+    asset.write_text("window.LightweightCharts={};", encoding="utf-8")
+    result = generate_provisional_trace_dashboard(
+        trace_path=trace,
+        collection_manifest_path=manifest,
+        output_path=output,
+        chart_asset_path=asset,
+        simulator_commit="835339a",
+        title="Pass 1",
+        max_points=20,
+    )
+    rendered = output.read_text(encoding="utf-8")
+    assert "PASS 2 VERIFICATION PENDING" in rendered
+    assert "wave-collection-v1-full" in rendered
+    assert "Equity, drawdown" in rendered
+    assert result["sessions"] == 1
+    assert result["fill_markers"] == 1

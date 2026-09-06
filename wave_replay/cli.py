@@ -22,7 +22,10 @@ from .continuous import (
     ReplayDatasetCollection,
 )
 from .datasets import ReplayDataset
-from .dashboard import generate_continuous_dashboard
+from .dashboard import (
+    generate_continuous_dashboard,
+    generate_provisional_trace_dashboard,
+)
 from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
 from .legacy_runner import LegacyWaveRunner
@@ -71,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     continuous.add_argument("--config")
 
     dashboard = subparsers.add_parser("render-continuous-dashboard")
-    dashboard.add_argument("--report", required=True)
+    dashboard.add_argument("--report")
     dashboard.add_argument("--trace", required=True)
     dashboard.add_argument("--output", required=True)
     dashboard.add_argument(
@@ -84,6 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dashboard.add_argument("--simulator-commit", required=True)
     dashboard.add_argument("--max-points", type=int, default=8_000)
+    dashboard.add_argument("--provisional-trace-only", action="store_true")
+    dashboard.add_argument("--collection-manifest")
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--expected", required=True)
@@ -149,15 +154,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay-continuous":
         return _run_continuous_replay(args)
     if args.command == "render-continuous-dashboard":
-        result = generate_continuous_dashboard(
-            report_path=args.report,
-            trace_path=args.trace,
-            output_path=args.output,
-            chart_asset_path=args.chart_asset,
-            simulator_commit=args.simulator_commit,
-            title=args.title,
-            max_points=args.max_points,
-        )
+        if args.provisional_trace_only:
+            if not args.collection_manifest:
+                raise ValueError(
+                    "--collection-manifest is required for provisional trace-only mode"
+                )
+            result = generate_provisional_trace_dashboard(
+                trace_path=args.trace,
+                collection_manifest_path=args.collection_manifest,
+                output_path=args.output,
+                chart_asset_path=args.chart_asset,
+                simulator_commit=args.simulator_commit,
+                title=args.title,
+                max_points=args.max_points,
+            )
+        else:
+            if not args.report:
+                raise ValueError("--report is required unless --provisional-trace-only is set")
+            result = generate_continuous_dashboard(
+                report_path=args.report,
+                trace_path=args.trace,
+                output_path=args.output,
+                chart_asset_path=args.chart_asset,
+                simulator_commit=args.simulator_commit,
+                title=args.title,
+                max_points=args.max_points,
+            )
         print(json.dumps(result, sort_keys=True))
         return 0
     if args.command == "compare":
