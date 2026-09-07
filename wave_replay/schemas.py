@@ -345,11 +345,21 @@ class ReplayScenario:
 
     @property
     def buy_gap_points(self) -> Decimal:
-        return (self.option_close_at_selection * Decimal("0.10")).quantize(Decimal("0.1"))
+        gap_pct = (
+            Decimal(str(self.replay.get("buy_gap_pct", "0.10")))
+            if self.role == "continuous"
+            else Decimal("0.10")
+        )
+        return (self.option_close_at_selection * gap_pct).quantize(Decimal("0.1"))
 
     @property
     def sell_gap_points(self) -> Decimal:
-        return (self.option_close_at_selection * Decimal("0.10")).quantize(Decimal("0.1"))
+        gap_pct = (
+            Decimal(str(self.replay.get("sell_gap_pct", "0.10")))
+            if self.role == "continuous"
+            else Decimal("0.10")
+        )
+        return (self.option_close_at_selection * gap_pct).quantize(Decimal("0.1"))
 
     def _validate(self) -> None:
         if not self.symbol.startswith("NIFTY") or not self.symbol.endswith("CE"):

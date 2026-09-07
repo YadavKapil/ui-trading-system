@@ -24,6 +24,14 @@ from .schemas import Contract, DatasetManifest, ReplayScenario, SchemaError
 COLLECTION_SCHEMA = "wave-replay-dataset-collection-v1"
 
 
+def _deep_update(target: dict[str, Any], updates: dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_update(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
 @dataclass(frozen=True)
 class DatasetPartition:
     session_date: dt.date
@@ -294,12 +302,38 @@ class ContinuousReplayConfig:
     missing_quote_policy: str = "skip_decision"
     initial_cash: Decimal = Decimal("1000000")
     session_broker_scripts: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    experiment_id: str | None = None
+    buy_gap_pct: Decimal = Decimal("0.10")
+    sell_gap_pct: Decimal = Decimal("0.10")
+    selection_min_premium: Decimal = Decimal("35")
+    selection_max_premium: Decimal = Decimal("65")
+    selection_target_premium: Decimal = Decimal("50")
+    keep_min_premium: Decimal = Decimal("35")
+    keep_max_premium: Decimal = Decimal("65")
+    minimum_calendar_dte: int = 2
+    pre_expiry_exit_dte: int = 1
 
     def __post_init__(self) -> None:
         self.wave_settings_hashes = dict(self.wave_settings_hashes)
         self.wave_settings_hashes["resolved_wave_settings"] = state_hash(self.wave_settings)
         if self.missing_quote_policy != "skip_decision":
             raise SchemaError("Continuous replay missing_quote_policy must be skip_decision")
+        if not Decimal("0.01") <= self.buy_gap_pct <= Decimal("0.50"):
+            raise SchemaError("Experiment buy_gap_pct must be between 0.01 and 0.50")
+        if not Decimal("0.01") <= self.sell_gap_pct <= Decimal("0.50"):
+            raise SchemaError("Experiment sell_gap_pct must be between 0.01 and 0.50")
+        if not (
+            Decimal("0") < self.selection_min_premium
+            <= self.selection_target_premium
+            <= self.selection_max_premium
+        ):
+            raise SchemaError("Experiment selection premium band/target is invalid")
+        if not (
+            Decimal("0") < self.keep_min_premium <= self.keep_max_premium
+        ):
+            raise SchemaError("Experiment keep premium band is invalid")
+        if self.minimum_calendar_dte < 2 or self.pre_expiry_exit_dte < 1:
+            raise SchemaError("Experiment DTE values are below safety minimums")
 
     @classmethod
     def from_mapping(
@@ -311,8 +345,13 @@ class ContinuousReplayConfig:
         default_start: str,
         default_end: str,
     ) -> "ContinuousReplayConfig":
+        schema = value.get("schema") if value else None
+        experiment = schema == "wave-replay-continuous-experiment-v1"
         if value and (
-            value.get("schema") != "wave-replay-continuous-config-v1"
+            schema not in {
+                "wave-replay-continuous-config-v1",
+                "wave-replay-continuous-experiment-v1",
+            }
             or int(value.get("schema_version", 0)) != 1
         ):
             raise SchemaError("Unsupported continuous replay config")
@@ -337,18 +376,68 @@ class ContinuousReplayConfig:
             for key, expected in approved.items()
             if key in strategy and strategy[key] != expected
         ]
-        if contradictions:
+        if contradictions and not experiment:
             raise SchemaError(
                 f"Continuous strategy settings contradict approved profile: {contradictions}"
+            )
+        resolved_wave_settings = copy.deepcopy(wave_settings)
+        if experiment:
+            _deep_update(
+                resolved_wave_settings,
+                dict(value.get("wave_settings_overrides", {})),
             )
         return cls(
             start=dt.date.fromisoformat(str(value.get("start", default_start))),
             end=dt.date.fromisoformat(str(value.get("end", default_end))),
-            wave_settings=wave_settings,
+            wave_settings=resolved_wave_settings,
             wave_settings_hashes=wave_settings_hashes,
             missing_quote_policy=str(value.get("missing_quote_policy", "skip_decision")),
             session_broker_scripts=dict(value.get("session_broker_scripts", {})),
+            experiment_id=(
+                str(value.get("experiment_id"))
+                if experiment and value.get("experiment_id")
+                else None
+            ),
+            buy_gap_pct=Decimal(str(strategy.get("buy_gap_pct", "0.10"))),
+            sell_gap_pct=Decimal(str(strategy.get("sell_gap_pct", "0.10"))),
+            selection_min_premium=Decimal(
+                str(strategy.get("selection_min_premium", "35"))
+            ),
+            selection_max_premium=Decimal(
+                str(strategy.get("selection_max_premium", "65"))
+            ),
+            selection_target_premium=Decimal(
+                str(strategy.get("selection_target_premium", "50"))
+            ),
+            keep_min_premium=Decimal(
+                str(strategy.get("keep_min_premium", "35"))
+            ),
+            keep_max_premium=Decimal(
+                str(strategy.get("keep_max_premium", "65"))
+            ),
+            minimum_calendar_dte=int(
+                strategy.get("minimum_calendar_dte", 2)
+            ),
+            pre_expiry_exit_dte=int(
+                strategy.get("pre_expiry_exit_dte", 1)
+            ),
         )
+
+    def experiment_mapping(self) -> dict[str, Any]:
+        return {
+            "experiment_id": self.experiment_id,
+            "buy_gap_pct": str(self.buy_gap_pct),
+            "sell_gap_pct": str(self.sell_gap_pct),
+            "selection_min_premium": str(self.selection_min_premium),
+            "selection_max_premium": str(self.selection_max_premium),
+            "selection_target_premium": str(self.selection_target_premium),
+            "keep_min_premium": str(self.keep_min_premium),
+            "keep_max_premium": str(self.keep_max_premium),
+            "minimum_calendar_dte": self.minimum_calendar_dte,
+            "pre_expiry_exit_dte": self.pre_expiry_exit_dte,
+            "wave_settings": self.wave_settings,
+            "wave_settings_hashes": self.wave_settings_hashes,
+        }
 
 
 class ContinuousTrace:
@@ -411,6 +500,7 @@ class ContinuousWaveRunner:
                 contract, underlying_bar, option_bar, candidates = _select_otm_target(
                     dataset,
                     session_date,
+                    config=self.config,
                 )
                 decision = {
                     "action": "select" if contract is not None else "no_trade",
@@ -440,7 +530,8 @@ class ContinuousWaveRunner:
                     next_date = dates[index + 1] if index + 1 < len(dates) else None
                     if (
                         next_date is not None
-                        and (held_contract.expiry - next_date).days <= 1
+                        and (held_contract.expiry - next_date).days
+                        <= self.config.pre_expiry_exit_dte
                     ):
                         raise SchemaError(
                             f"No synchronized quote to close {held_contract.instrument_id} "
@@ -476,8 +567,12 @@ class ContinuousWaveRunner:
                     del dataset
                     continue
                 held_dte = (held_contract.expiry - session_date).days
-                held_in_range = Decimal("35") <= held_option.close <= Decimal("65")
-                if held_dte >= 2 and held_in_range:
+                held_in_range = (
+                    self.config.keep_min_premium
+                    <= held_option.close
+                    <= self.config.keep_max_premium
+                )
+                if held_dte >= self.config.minimum_calendar_dte and held_in_range:
                     contract = held_contract
                     underlying_bar = held_underlying
                     option_bar = held_option
@@ -502,8 +597,8 @@ class ContinuousWaveRunner:
                         held_contract,
                         held_option,
                         reason=(
-                            "held_expiry_below_2_dte"
-                            if held_dte < 2
+                            "held_expiry_below_minimum_dte"
+                            if held_dte < self.config.minimum_calendar_dte
                             else "held_premium_outside_35_65"
                         ),
                     )
@@ -513,6 +608,7 @@ class ContinuousWaveRunner:
                         dataset,
                         session_date,
                         at=held_option.bar_end,
+                        config=self.config,
                     )
                     decision = {
                         "action": "switch" if contract is not None else "switch_to_flat",
@@ -568,7 +664,9 @@ class ContinuousWaveRunner:
                 del dataset
                 continue
             roll_before_next = (
-                next_date is not None and (contract.expiry - next_date).days <= 1
+                next_date is not None
+                and (contract.expiry - next_date).days
+                <= self.config.pre_expiry_exit_dte
             )
             scenario = _continuous_scenario(
                 dataset,
@@ -693,8 +791,8 @@ class ContinuousWaveRunner:
                 "trigger_mode": "close_only",
                 "activation_policy": "subsequent_bar",
                 "fill_price_mode": "limit",
-                "buy_gap_pct": 0.10,
-                "sell_gap_pct": 0.10,
+                "buy_gap_pct": str(self.config.buy_gap_pct),
+                "sell_gap_pct": str(self.config.sell_gap_pct),
                 "cool_off_mode": "disabled",
                 "same_side_fill_cooldown": "enabled",
                 "broker_fee_model": "upstox_approximation",
@@ -702,8 +800,9 @@ class ContinuousWaveRunner:
                 "roll_policy": {
                     "owner": "simulator",
                     "not_original_wave": True,
-                    "minimum_session_dte": 2,
-                    "carry_into_one_dte_session": False,
+                    "minimum_session_dte": self.config.minimum_calendar_dte,
+                    "pre_expiry_exit_dte": self.config.pre_expiry_exit_dte,
+                    "carry_into_pre_expiry_session": False,
                     "liquidation_mark": "15:29_available_completed_minute_close",
                     "next_session_source": "authoritative_collection_calendar",
                     "overlap_allowed": False,
@@ -711,9 +810,9 @@ class ContinuousWaveRunner:
                 "selection_policy": {
                     "right": "call",
                     "moneyness": "strictly_otm",
-                    "minimum_premium": "35",
-                    "maximum_premium": "65",
-                    "target_premium": "50",
+                    "minimum_premium": str(self.config.selection_min_premium),
+                    "maximum_premium": str(self.config.selection_max_premium),
+                    "target_premium": str(self.config.selection_target_premium),
                     "expiry": "nearest_listed_with_at_least_2_calendar_dte",
                     "tie_break": [
                         "absolute_premium_distance",
@@ -736,6 +835,7 @@ class ContinuousWaveRunner:
                 "fees": str(persistent_state["fees_paid"]),
                 "positions": ending_positions,
             },
+            "experiment": self.config.experiment_mapping(),
             "activity": {
                 "orders": sum(item["orders"] for item in sessions),
                 "fills": sum(item["fills"] for item in sessions),
@@ -923,8 +1023,10 @@ def _continuous_scenario(
             config.session_broker_scripts.get(session_date.isoformat(), [])
         ),
         replay={
-            "min_calendar_dte": 2,
+            "min_calendar_dte": config.minimum_calendar_dte,
             "selection_policy": "nearest_expiry_strict_otm_premium_35_65_target_50",
+            "buy_gap_pct": str(config.buy_gap_pct),
+            "sell_gap_pct": str(config.sell_gap_pct),
         },
         initial_cash=config.initial_cash,
     )
@@ -993,7 +1095,14 @@ def _select_otm_target(
     session_date: dt.date,
     *,
     at: dt.datetime | None = None,
+    config: ContinuousReplayConfig | None = None,
 ) -> tuple[Contract | None, Any | None, Any | None, list[dict[str, Any]]]:
+    config = config or ContinuousReplayConfig(
+        start=session_date,
+        end=session_date,
+        wave_settings={},
+        wave_settings_hashes={},
+    )
     underlying_by_end = {
         bar.bar_end: bar
         for bar in dataset.underlying_bars
@@ -1011,7 +1120,7 @@ def _select_otm_target(
         if contract.underlying == "NIFTY"
         and contract.right == "call"
         and contract.wave_trading_symbol is not None
-        and (contract.expiry - session_date).days >= 2
+        and (contract.expiry - session_date).days >= config.minimum_calendar_dte
     ]
     if not eligible:
         return None, None, None, []
@@ -1045,7 +1154,9 @@ def _select_otm_target(
             strictly_otm = contract.strike > underlying.close
             premium_in_range = (
                 premium is not None
-                and Decimal("35") <= premium <= Decimal("65")
+                and config.selection_min_premium
+                <= premium
+                <= config.selection_max_premium
             )
             candidate = {
                 "instrument_id": contract.instrument_id,
@@ -1072,7 +1183,7 @@ def _select_otm_target(
         selected, option = min(
             qualified,
             key=lambda pair: (
-                abs(pair[1].close - Decimal("50")),
+                abs(pair[1].close - config.selection_target_premium),
                 pair[0].strike,
                 pair[0].instrument_id,
             ),

@@ -7,6 +7,7 @@ import datetime as dt
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -30,6 +31,7 @@ from .fake_kite import FakeKite
 from .fake_ticker import FakeTicker
 from .legacy_runner import LegacyWaveRunner
 from .network_guard import UnexpectedNetworkAccess
+from .normalize import state_hash
 from .schemas import IST, ReplayScenario
 from .scheduler import DeterministicScheduler
 from .selector import build_scenarios, load_saved_wave_settings
@@ -72,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
     continuous.add_argument("--wave-config", default="wave_extractor_config.json")
     continuous.add_argument("--delta-limits", default="delta_limits.json")
     continuous.add_argument("--config")
+    continuous.add_argument("--compact", action="store_true")
 
     dashboard = subparsers.add_parser("render-continuous-dashboard")
     dashboard.add_argument("--report")
@@ -288,10 +291,11 @@ def _run_continuous_replay(args) -> int:
             collection=collection,
             config=config,
         ).run()
-        trace.write_jsonl(
-            output
-            / (f"continuous-trace-{index + 1}.jsonl" if args.repeat > 1 else "continuous-trace.jsonl")
-        )
+        if not args.compact:
+            trace.write_jsonl(
+                output
+                / (f"continuous-trace-{index + 1}.jsonl" if args.repeat > 1 else "continuous-trace.jsonl")
+            )
         digests.append(trace.digest())
         reports.append(report)
     if len(set(digests)) != 1 or len({report["report_hash"] for report in reports}) != 1:
@@ -305,11 +309,27 @@ def _run_continuous_replay(args) -> int:
         "trace_digest": digests[0],
         "report_hash": final_report["report_hash"],
     }
-    report_path = output / "continuous-report.json"
-    report_path.write_text(
-        json.dumps(final_report, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    if args.compact:
+        report_path = output / "experiment-manifest.json"
+        report_path.write_text(
+            json.dumps(
+                _compact_experiment_manifest(
+                    final_report,
+                    config,
+                    collection,
+                    args,
+                ),
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+    else:
+        report_path = output / "continuous-report.json"
+        report_path.write_text(
+            json.dumps(final_report, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
     print(
         json.dumps(
             {"report": str(report_path.resolve()), "trace_digest": digests[0]},
@@ -317,6 +337,52 @@ def _run_continuous_replay(args) -> int:
         )
     )
     return 0
+
+
+def _compact_experiment_manifest(
+    report: dict,
+    config: ContinuousReplayConfig,
+    collection: ReplayDatasetCollection,
+    args,
+) -> dict:
+    forced = report["forced_close_sensitivity"]
+    return {
+        "schema": "wave-replay-january-experiment-result-v1",
+        "experiment_id": config.experiment_id,
+        "parameter_hash": state_hash(config.experiment_mapping()),
+        "resolved_parameters": config.experiment_mapping(),
+        "code_commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+        ).strip(),
+        "collection_id": collection.to_manifest()["collection_id"],
+        "collection_sha256": collection.to_manifest()["collection_sha256"],
+        "requested_range": report["requested_range"],
+        "boundary": report["final_boundary_mtm"],
+        "forced_close": forced,
+        "net_pnl": forced["pnl"],
+        "fees": forced["total_fees"],
+        "max_drawdown": report["drawdown"],
+        "fills": report["activity"]["fills"],
+        "orders": report["activity"]["orders"],
+        "cancels": report["activity"]["cancels"],
+        "inventory": report["inventory"],
+        "contract_statistics": report["contract_statistics"],
+        "trace_digest": report["trace_digest"],
+        "report_hash": report["report_hash"],
+        "trace_written": not args.compact,
+        "acceptance": {
+            "forced_close_profitable": (
+                forced["pnl"] is not None and float(forced["pnl"]) > 0
+            ),
+            "minimum_fills": report["activity"]["fills"] >= 10,
+            "forced_close_flat": (
+                forced.get("available") is True
+                and not forced.get("unavailable_symbols")
+                and forced.get("unrealized_pnl") == "0"
+            ),
+        },
+    }
 
 
 def _boundary_probe(repository_root: Path) -> dict:
