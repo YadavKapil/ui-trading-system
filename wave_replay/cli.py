@@ -32,6 +32,7 @@ from .fake_ticker import FakeTicker
 from .legacy_runner import LegacyWaveRunner
 from .network_guard import UnexpectedNetworkAccess
 from .normalize import state_hash
+from .order_chart import generate_order_chart
 from .schemas import IST, ReplayScenario
 from .scheduler import DeterministicScheduler
 from .selector import build_scenarios, load_saved_wave_settings
@@ -112,6 +113,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     trade_dashboard.add_argument("--simulator-commit", required=True)
     trade_dashboard.add_argument("--max-points", type=int, default=8_000)
+
+    order_chart = subparsers.add_parser("render-order-chart")
+    order_chart.add_argument("--report", required=True)
+    order_chart.add_argument("--trace", required=True)
+    order_chart.add_argument("--collection-manifest", required=True)
+    order_chart.add_argument("--output", required=True)
+    order_chart.add_argument(
+        "--chart-asset",
+        default="static/vendor/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js",
+    )
+    order_chart.add_argument("--title", default="Wave Option Orders")
+    order_chart.add_argument("--simulator-commit", required=True)
+    order_chart.add_argument(
+        "--default-episode",
+        default="episode-2b11ea0b7d-001",
+    )
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--expected", required=True)
@@ -214,6 +231,19 @@ def main(argv: list[str] | None = None) -> int:
             simulator_commit=args.simulator_commit,
             title=args.title,
             max_points=args.max_points,
+        )
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if args.command == "render-order-chart":
+        result = generate_order_chart(
+            report_path=args.report,
+            trace_path=args.trace,
+            collection_manifest_path=args.collection_manifest,
+            output_path=args.output,
+            chart_asset_path=args.chart_asset,
+            simulator_commit=args.simulator_commit,
+            title=args.title,
+            default_episode_id=args.default_episode,
         )
         print(json.dumps(result, sort_keys=True))
         return 0
