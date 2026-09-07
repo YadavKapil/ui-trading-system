@@ -33,6 +33,7 @@ def test_experiment_config_overrides_are_explicit_and_default_safe():
             "schema": "wave-replay-continuous-experiment-v1",
             "schema_version": 1,
             "experiment_id": "gap-20-cooldown",
+            "sample_classification": "out_of_sample",
             "strategy": {
                 "buy_gap_pct": "0.20",
                 "sell_gap_pct": "0.20",
@@ -58,6 +59,7 @@ def test_experiment_config_overrides_are_explicit_and_default_safe():
     assert experiment.buy_gap_pct == Decimal("0.20")
     assert experiment.keep_min_premium == Decimal("40")
     assert experiment.minimum_calendar_dte == 3
+    assert experiment.sample_classification == "out_of_sample"
     assert experiment.wave_settings["fill_cooldown"]["trigger_count"] == 1
     assert DEFAULT_WAVE_SETTINGS["fill_cooldown"]["trigger_count"] == 2
 

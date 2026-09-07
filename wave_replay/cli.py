@@ -75,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
     continuous.add_argument("--delta-limits", default="delta_limits.json")
     continuous.add_argument("--config")
     continuous.add_argument("--compact", action="store_true")
+    continuous.add_argument(
+        "--sample-classification",
+        choices=("in_sample", "out_of_sample"),
+    )
 
     dashboard = subparsers.add_parser("render-continuous-dashboard")
     dashboard.add_argument("--report")
@@ -281,6 +285,10 @@ def _run_continuous_replay(args) -> int:
         default_start=args.start,
         default_end=args.end,
     )
+    if args.sample_classification is not None:
+        if config.experiment_id is None:
+            raise ValueError("--sample-classification requires an experiment config")
+        config.sample_classification = args.sample_classification
     if args.compact and config.experiment_id is None:
         raise ValueError("--compact requires an experiment config with experiment_id")
     output = Path(args.output)

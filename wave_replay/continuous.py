@@ -319,6 +319,7 @@ class ContinuousReplayConfig:
     keep_max_premium: Decimal = Decimal("65")
     minimum_calendar_dte: int = 2
     pre_expiry_exit_dte: int = 1
+    sample_classification: str = "in_sample"
 
     def __post_init__(self) -> None:
         self.wave_settings_hashes = dict(self.wave_settings_hashes)
@@ -341,6 +342,8 @@ class ContinuousReplayConfig:
             raise SchemaError("Experiment keep premium band is invalid")
         if self.minimum_calendar_dte < 2 or self.pre_expiry_exit_dte < 1:
             raise SchemaError("Experiment DTE values are below safety minimums")
+        if self.sample_classification not in {"in_sample", "out_of_sample"}:
+            raise SchemaError("Unsupported experiment sample classification")
 
     @classmethod
     def from_mapping(
@@ -449,6 +452,11 @@ class ContinuousReplayConfig:
             pre_expiry_exit_dte=int(
                 strategy.get("pre_expiry_exit_dte", 1) if experiment else 1
             ),
+            sample_classification=str(
+                value.get("sample_classification", "in_sample")
+                if experiment
+                else "in_sample"
+            ),
         )
 
     def experiment_mapping(self) -> dict[str, Any]:
@@ -463,6 +471,7 @@ class ContinuousReplayConfig:
             "keep_max_premium": str(self.keep_max_premium),
             "minimum_calendar_dte": self.minimum_calendar_dte,
             "pre_expiry_exit_dte": self.pre_expiry_exit_dte,
+            "sample_classification": self.sample_classification,
             "wave_settings": self.wave_settings,
             "wave_settings_hashes": self.wave_settings_hashes,
         }
@@ -880,10 +889,12 @@ class ContinuousWaveRunner:
                 calculate_profit_on_peak_capital(
                     monthly_profit=Decimal(str(forced_close["pnl"])),
                     peaks=capital_peaks,
+                    sample_classification=self.config.sample_classification,
                 )
                 if _is_complete_calendar_month(self.config.start, self.config.end)
                 else _unavailable_non_monthly_profit(
-                    Decimal(str(forced_close["pnl"]))
+                    Decimal(str(forced_close["pnl"])),
+                    sample_classification=self.config.sample_classification,
                 )
             )
             if self.config.experiment_id is not None
@@ -1618,9 +1629,14 @@ def _is_complete_calendar_month(start: dt.date, end: dt.date) -> bool:
     return end == next_month - dt.timedelta(days=1)
 
 
-def _unavailable_non_monthly_profit(period_profit: Decimal) -> dict[str, Any]:
+def _unavailable_non_monthly_profit(
+    period_profit: Decimal,
+    *,
+    sample_classification: str,
+) -> dict[str, Any]:
     return {
         "classification": "unavailable_non_monthly_period",
+        "sample_classification": sample_classification,
         "annualization": (
             "monthly and annualized percentages require one complete calendar month"
         ),

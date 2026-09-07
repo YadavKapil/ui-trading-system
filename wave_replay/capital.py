@@ -199,7 +199,11 @@ def calculate_profit_on_peak_capital(
     *,
     monthly_profit: Decimal,
     peaks: dict[str, Any],
+    sample_classification: str = "in_sample",
 ) -> dict[str, Any]:
+    if sample_classification not in {"in_sample", "out_of_sample"}:
+        raise ValueError("Unsupported sample classification")
+
     def percentage(metric: str) -> str | None:
         peak = peaks.get(metric)
         if peak is None:
@@ -212,7 +216,7 @@ def calculate_profit_on_peak_capital(
     excluding = percentage("capital_used_excluding_margin")
     including = percentage("capital_used_including_margin")
     return {
-        "classification": "in_sample_linear_annualized",
+        "classification": f"{sample_classification}_linear_annualized",
         "annualization": (
             "simple monthly percentage multiplied by 12; not CAGR or compounding"
         ),

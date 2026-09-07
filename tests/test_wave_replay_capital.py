@@ -157,6 +157,12 @@ def test_peak_tracking_and_simple_linear_annualization():
     assert profit["monthly_profit_pct_including_margin"] == "1.00"
     assert profit["annualized_profit_pct_including_margin"] == "12.00"
     assert profit["classification"] == "in_sample_linear_annualized"
+    out_of_sample = calculate_profit_on_peak_capital(
+        monthly_profit=Decimal("3413"),
+        peaks=peaks,
+        sample_classification="out_of_sample",
+    )
+    assert out_of_sample["classification"] == "out_of_sample_linear_annualized"
 
     zero = calculate_profit_on_peak_capital(
         monthly_profit=Decimal("10"),
