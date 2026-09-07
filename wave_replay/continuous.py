@@ -642,7 +642,11 @@ class ContinuousWaveRunner:
                                 else "held_expiry_below_2_dte"
                             )
                             if held_dte < self.config.minimum_calendar_dte
-                            else "held_premium_outside_35_65"
+                            else (
+                                "held_premium_outside_"
+                                f"{self.config.keep_min_premium}_"
+                                f"{self.config.keep_max_premium}"
+                            )
                         ),
                         full_precision_fees=(
                             self.config.experiment_id is not None
@@ -710,9 +714,31 @@ class ContinuousWaveRunner:
                 })
                 equity_curve.extend(no_trade["equity_curve"])
                 if self.config.experiment_id is not None:
+                    pre_gap = next(
+                        (
+                            point
+                            for point in no_trade["equity_curve"]
+                            if point.get("reason")
+                            == "waiting_for_first_synchronized_contract_quote"
+                        ),
+                        None,
+                    )
+                    if (
+                        pre_gap is not None
+                        and _nonzero_positions(opening_state["positions"])
+                    ):
+                        capital_curve.append(
+                            calculate_capital_snapshot(
+                                at=pre_gap["at"],
+                                positions=opening_state["positions"],
+                                orders=[],
+                                option_marks={},
+                                underlying_spot=None,
+                            )
+                        )
                     capital_curve.append(
                         calculate_capital_snapshot(
-                            at=no_trade["equity_curve"][0]["at"],
+                            at=no_trade["equity_curve"][-1]["at"],
                             positions=persistent_state["positions"],
                             orders=[],
                             option_marks={},
@@ -763,6 +789,20 @@ class ContinuousWaveRunner:
                 opening_state,
                 contract.instrument_id,
             )
+            if (
+                self.config.experiment_id is not None
+                and pre_points
+                and _nonzero_positions(opening_state["positions"])
+            ):
+                capital_curve.append(
+                    calculate_capital_snapshot(
+                        at=pre_points[0]["at"],
+                        positions=opening_state["positions"],
+                        orders=[],
+                        option_marks={},
+                        underlying_spot=None,
+                    )
+                )
             time_without_contract = 0
             if decision.get("switch_close"):
                 switch = decision["switch_close"]
@@ -829,15 +869,22 @@ class ContinuousWaveRunner:
             full_precision_fees=self.config.experiment_id is not None,
         )
         del final_dataset
+        capital_curve.sort(key=lambda point: point["at"])
         capital_peaks = (
             calculate_capital_peaks(capital_curve)
             if self.config.experiment_id is not None
             else {}
         )
         capital_profit = (
-            calculate_profit_on_peak_capital(
-                monthly_profit=Decimal(str(forced_close["pnl"])),
-                peaks=capital_peaks,
+            (
+                calculate_profit_on_peak_capital(
+                    monthly_profit=Decimal(str(forced_close["pnl"])),
+                    peaks=capital_peaks,
+                )
+                if _is_complete_calendar_month(self.config.start, self.config.end)
+                else _unavailable_non_monthly_profit(
+                    Decimal(str(forced_close["pnl"]))
+                )
             )
             if self.config.experiment_id is not None
             and forced_close.get("pnl") is not None
@@ -887,7 +934,10 @@ class ContinuousWaveRunner:
                     "minimum_premium": str(self.config.selection_min_premium),
                     "maximum_premium": str(self.config.selection_max_premium),
                     "target_premium": str(self.config.selection_target_premium),
-                    "expiry": "nearest_listed_with_at_least_2_calendar_dte",
+                    "expiry": (
+                        "nearest_listed_with_at_least_"
+                        f"{self.config.minimum_calendar_dte}_calendar_dte"
+                    ),
                     "tie_break": [
                         "absolute_premium_distance",
                         "lower_strike",
@@ -1559,6 +1609,28 @@ def _pre_start_gap(
         "duration_seconds": duration,
     }
     return [point], [decision], duration
+
+
+def _is_complete_calendar_month(start: dt.date, end: dt.date) -> bool:
+    if start.day != 1 or (start.year, start.month) != (end.year, end.month):
+        return False
+    next_month = (start.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    return end == next_month - dt.timedelta(days=1)
+
+
+def _unavailable_non_monthly_profit(period_profit: Decimal) -> dict[str, Any]:
+    return {
+        "classification": "unavailable_non_monthly_period",
+        "annualization": (
+            "monthly and annualized percentages require one complete calendar month"
+        ),
+        "period_profit": str(period_profit),
+        "monthly_profit": None,
+        "monthly_profit_pct_excluding_margin": None,
+        "monthly_profit_pct_including_margin": None,
+        "annualized_profit_pct_excluding_margin": None,
+        "annualized_profit_pct_including_margin": None,
+    }
 
 
 def _apply_pre_start_gap_to_flat_session(

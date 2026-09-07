@@ -446,11 +446,16 @@ def test_out_of_range_held_contract_switches_without_overlap(tmp_path):
     report, _trace = ContinuousWaveRunner(
         repository_root=".",
         collection=_MutatingCollection(collection, mutate),
-        config=_continuous_config(),
+        config=dataclasses.replace(
+            _continuous_config(),
+            experiment_id="band-40-60",
+            keep_min_premium=Decimal("40"),
+            keep_max_premium=Decimal("60"),
+        ),
     ).run()
     decision = report["sessions"][1]["contract_decision"]
     assert decision["action"] == "switch"
-    assert decision["reason"] == "held_premium_outside_35_65"
+    assert decision["reason"] == "held_premium_outside_40_60"
     assert decision["held_premium"] == "70"
     assert report["switches"][0]["close_price"] == "70"
     assert report["sessions"][1]["contract"]["strike"] == "24050"
@@ -496,7 +501,11 @@ def test_delayed_out_of_range_switch_does_not_backdate_post_switch_state(tmp_pat
     report, _trace = ContinuousWaveRunner(
         repository_root=".",
         collection=_MutatingCollection(collection, mutate),
-        config=dataclasses.replace(_continuous_config(), end=dt.date(2025, 1, 7)),
+        config=dataclasses.replace(
+            _continuous_config(),
+            end=dt.date(2025, 1, 7),
+            experiment_id="delayed-carried-quote",
+        ),
     ).run()
     session = report["sessions"][1]
     assert session["contract_decision"]["action"] == "switch"
@@ -507,6 +516,20 @@ def test_delayed_out_of_range_switch_does_not_backdate_post_switch_state(tmp_pat
         point["equity"] is None
         for point in session["equity_curve"]
         if point["at"] < "2025-01-07T09:17:00"
+    )
+    capital = report["capital"]
+    assert any(
+        point["at"] == "2025-01-07T09:16:00+05:30"
+        and point["capital_used_including_margin"] is None
+        and point["missing_underlying_spot"] is True
+        for point in capital["curve"]
+    )
+    assert capital["peaks"]["coverage"]["capital_used_including_margin"][
+        "complete"
+    ] is False
+    assert capital["peaks"]["capital_used_including_margin"] is None
+    assert capital["profit_on_peak_capital"]["classification"] == (
+        "unavailable_non_monthly_period"
     )
 
 

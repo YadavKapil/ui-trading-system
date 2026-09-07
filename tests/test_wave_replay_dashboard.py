@@ -363,6 +363,11 @@ def test_dashboard_capital_section_discloses_model_and_annualization():
                 },
             },
             "profit_on_peak_capital": {
+                "classification": "in_sample_linear_annualized",
+                "annualization": (
+                    "simple monthly percentage multiplied by 12; "
+                    "not CAGR or compounding"
+                ),
                 "monthly_profit": "1800",
                 "monthly_profit_pct_excluding_margin": "18",
                 "monthly_profit_pct_including_margin": "1",
@@ -374,5 +379,5 @@ def test_dashboard_capital_section_discloses_model_and_annualization():
     rendered = _capital_section(report)
     assert "crude_naked_option_margin_v1" in rendered
     assert "not Zerodha/NSE SPAN" in rendered
-    assert "in-sample_linear_annualized" in rendered
+    assert "in_sample_linear_annualized" in rendered
     assert "12.0000%" in rendered

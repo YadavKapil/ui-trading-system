@@ -166,6 +166,7 @@ def test_experiment_report_includes_capital_peaks_and_fee_audit(tmp_path):
             "strategy": {
                 "buy_gap_pct": "0.20",
                 "sell_gap_pct": "0.20",
+                "minimum_calendar_dte": 3,
             },
         },
         wave_settings=DEFAULT_WAVE_SETTINGS,
@@ -183,7 +184,13 @@ def test_experiment_report_includes_capital_peaks_and_fee_audit(tmp_path):
     assert report["capital"]["peaks"]["capital_used_including_margin"]
     assert report["capital"]["profit_on_peak_capital"][
         "classification"
-    ] == "in_sample_linear_annualized"
+    ] == "unavailable_non_monthly_period"
+    assert report["capital"]["profit_on_peak_capital"][
+        "monthly_profit_pct_including_margin"
+    ] is None
+    assert report["settings"]["selection_policy"]["expiry"] == (
+        "nearest_listed_with_at_least_3_calendar_dte"
+    )
     assert isinstance(report["fee_audit"]["events"], list)
     assert report["fee_audit"]["forced_close"]["reconciles"] is True
     assert Decimal(report["fee_audit"]["full_precision_total"]) == Decimal(

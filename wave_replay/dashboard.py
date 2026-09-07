@@ -800,8 +800,8 @@ def _capital_section(report: dict[str, Any]) -> str:
     return (
         '<section class="panel wide"><h2>Crude naked-option capital model</h2>'
         f'<p class="note"><strong>{html.escape(capital["model_id"])}</strong> — '
-        f'{html.escape(capital["disclaimer"])}. Peak denominator is the maximum '
-        'observed during the month.</p>'
+        f'{html.escape(capital["disclaimer"])}. Peak values are the maximum '
+        'observed during the requested period.</p>'
         '<table><thead><tr><th>Metric</th><th>Peak value</th><th>Timestamp</th>'
         '<th>Projected short qty</th></tr></thead><tbody>'
         + "".join(rows)
@@ -816,7 +816,11 @@ def _capital_section(report: dict[str, Any]) -> str:
         + html.escape(_format_percent(profit.get("annualized_profit_pct_excluding_margin")))
         + "; incl-margin "
         + html.escape(_format_percent(profit.get("annualized_profit_pct_including_margin")))
-        + ". This is in-sample_linear_annualized (monthly percentage ×12), not CAGR."
+        + ". Classification: "
+        + html.escape(str(profit.get("classification", "unknown")))
+        + "; "
+        + html.escape(str(profit.get("annualization", "annualization unavailable")))
+        + "."
         "</p></section>"
     )
 
