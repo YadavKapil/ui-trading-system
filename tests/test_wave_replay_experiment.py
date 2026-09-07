@@ -4,9 +4,12 @@ from decimal import Decimal
 import pytest
 
 from wave_replay.continuous import ContinuousReplayConfig
+from wave_replay.continuous import ContinuousWaveRunner, ReplayDatasetCollection
+from wave_replay.capital import MODEL_ID
 from wave_replay.normalize import state_hash
 from wave_replay.schemas import ReplayScenario, SchemaError
 from wave_replay.selector import DEFAULT_WAVE_SETTINGS
+from wave_replay.synthetic import create_synthetic_dataset
 
 
 def _hashes(settings):
@@ -68,6 +71,32 @@ def test_experiment_config_rejects_unsafe_ranges():
             wave_settings_hashes=_hashes(DEFAULT_WAVE_SETTINGS),
             buy_gap_pct=Decimal("0"),
         )
+    with pytest.raises(SchemaError, match="Experiment strategy overrides require"):
+        ContinuousReplayConfig.from_mapping(
+            {
+                "schema": "wave-replay-continuous-config-v1",
+                "schema_version": 1,
+                "strategy": {"buy_gap_pct": "0.25"},
+            },
+            wave_settings=DEFAULT_WAVE_SETTINGS,
+            wave_settings_hashes=_hashes(DEFAULT_WAVE_SETTINGS),
+            default_start="2026-01-01",
+            default_end="2026-01-31",
+        )
+    for invalid_id in (None, 0, False, ""):
+        with pytest.raises(SchemaError, match="non-empty experiment_id"):
+            ContinuousReplayConfig.from_mapping(
+                {
+                    "schema": "wave-replay-continuous-experiment-v1",
+                    "schema_version": 1,
+                    "experiment_id": invalid_id,
+                    "strategy": {"buy_gap_pct": "0.20"},
+                },
+                wave_settings=DEFAULT_WAVE_SETTINGS,
+                wave_settings_hashes=_hashes(DEFAULT_WAVE_SETTINGS),
+                default_start="2026-01-01",
+                default_end="2026-01-31",
+            )
     with pytest.raises(SchemaError, match="premium band"):
         ContinuousReplayConfig(
             start=dt.date(2026, 1, 1),
@@ -111,3 +140,52 @@ def test_continuous_scenario_gap_points_use_experiment_percentages():
     )
     assert scenario.buy_gap_points == Decimal("7.5")
     assert scenario.sell_gap_points == Decimal("12.5")
+
+
+def test_experiment_report_includes_capital_peaks_and_fee_audit(tmp_path):
+    day = dt.date(2026, 1, 5)
+    dataset = create_synthetic_dataset(
+        tmp_path / "dataset",
+        corpus=[{
+            "role": "range",
+            "date": day,
+            "strike": Decimal("24000"),
+            "first_close": Decimal("23995"),
+            "expiry": dt.date(2026, 1, 13),
+            "lot_size": 65,
+            "missing": 0,
+            "option_base": "50",
+        }],
+        integrity_profile_override="wave-replay-special-sessions-v3",
+    )
+    config = ContinuousReplayConfig.from_mapping(
+        {
+            "schema": "wave-replay-continuous-experiment-v1",
+            "schema_version": 1,
+            "experiment_id": "capital-report",
+            "strategy": {
+                "buy_gap_pct": "0.20",
+                "sell_gap_pct": "0.20",
+            },
+        },
+        wave_settings=DEFAULT_WAVE_SETTINGS,
+        wave_settings_hashes=_hashes(DEFAULT_WAVE_SETTINGS),
+        default_start=day.isoformat(),
+        default_end=day.isoformat(),
+    )
+    report, _trace = ContinuousWaveRunner(
+        repository_root=".",
+        collection=ReplayDatasetCollection.from_inputs([dataset]),
+        config=config,
+    ).run()
+    assert report["capital"]["model_id"] == MODEL_ID
+    assert report["capital"]["curve"]
+    assert report["capital"]["peaks"]["capital_used_including_margin"]
+    assert report["capital"]["profit_on_peak_capital"][
+        "classification"
+    ] == "in_sample_linear_annualized"
+    assert isinstance(report["fee_audit"]["events"], list)
+    assert report["fee_audit"]["forced_close"]["reconciles"] is True
+    assert Decimal(report["fee_audit"]["full_precision_total"]) == Decimal(
+        report["account"]["fees"]
+    )

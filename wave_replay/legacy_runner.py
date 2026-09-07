@@ -88,6 +88,12 @@ class LegacyWaveRunner:
                 and event.get("after_seconds") is None
             ]),
             fee_schedule=fee_schedule,
+            capital_tracking=bool(
+                self.scenario.replay.get("capital_model")
+            ),
+            full_precision_fees=bool(
+                self.scenario.replay.get("capital_model")
+            ),
         )
         if self.persistent_broker_state is not None:
             engine.restore_persistent_state(self.persistent_broker_state)
@@ -177,6 +183,7 @@ class LegacyWaveRunner:
                     incomplete_at.add(bar.bar_end)
                     engine.latest_quotes.pop(self._quote_key(underlying_bar), None)
                     engine.latest_quotes.pop(self._quote_key(option_bar), None)
+                    engine.record_capital_snapshot()
                     missing_id = (
                         underlying_bar.instrument_id if underlying_bar.missing_bar else option_bar.instrument_id
                     )
@@ -211,6 +218,7 @@ class LegacyWaveRunner:
                     last_price=option_bar.close,
                     instrument_token=contract.instrument_token,
                 )
+                engine.record_capital_snapshot()
                 if self.continuous_context and not started["value"]:
                     engine.mark_to_market(contract.wave_trading_symbol, option_bar.close)
                 if started["value"]:
@@ -445,6 +453,8 @@ class LegacyWaveRunner:
                     "subsequent_shutdown_poll_modeled": True,
                 })
                 report["equity_curve"] = list(self.equity_points)
+                if self.scenario.replay.get("capital_model"):
+                    report["capital_curve"] = list(engine.capital_snapshots)
                 self.final_broker_state = engine.export_persistent_state()
             report_path = bootstrap.paths.output / "report.json"
             report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -910,6 +920,17 @@ class LegacyWaveRunner:
                 "broker_fee_model": "upstox_approximation",
                 "zerodha_fee_fidelity": False,
                 "fees_paid": str(engine.fees_paid),
+                **(
+                    {
+                        "components": {
+                            name: str(value)
+                            for name, value in engine.fee_components_paid.items()
+                        },
+                        "events": list(engine.fee_events),
+                    }
+                    if self.scenario.replay.get("capital_model")
+                    else {}
+                ),
             },
             "risk_outputs": {
                 "status": "unknown_missing_quote" if unknown_data else "computed",

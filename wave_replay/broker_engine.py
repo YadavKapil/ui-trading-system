@@ -102,6 +102,21 @@ class FeeSchedule:
         price: Decimal,
         include_brokerage: bool = True,
     ) -> Decimal:
+        return self.calculate_breakdown(
+            side=side,
+            quantity=quantity,
+            price=price,
+            include_brokerage=include_brokerage,
+        )["total"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def calculate_breakdown(
+        self,
+        *,
+        side: str,
+        quantity: int,
+        price: Decimal,
+        include_brokerage: bool = True,
+    ) -> dict[str, Decimal]:
         turnover = Decimal(quantity) * price
         resolved = self.value["resolved_schedule"]
         broker = resolved["broker"]
@@ -119,8 +134,20 @@ class FeeSchedule:
         exchange = turnover * exchange_rate
         sebi = turnover * sebi_rate
         subtotal = brokerage_flat + exchange + sebi
-        total = subtotal + subtotal * gst_rate + turnover * stt_rate + turnover * stamp_rate
-        return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        gst = subtotal * gst_rate
+        stt = turnover * stt_rate
+        stamp = turnover * stamp_rate
+        return {
+            "brokerage": brokerage_flat,
+            "exchange": exchange,
+            "stt": stt,
+            "sebi": sebi,
+            "gst": gst,
+            "stamp_duty": stamp,
+            "dp": Decimal("0"),
+            "ipft": Decimal("0"),
+            "total": subtotal + gst + stt + stamp,
+        }
 
 
 class BrokerEngine:
@@ -133,6 +160,8 @@ class BrokerEngine:
         visibility: VisibilityOffsets | None = None,
         faults: FaultScript | None = None,
         fee_schedule: FeeSchedule | None = None,
+        capital_tracking: bool = False,
+        full_precision_fees: bool = False,
     ) -> None:
         self.scheduler = scheduler
         self.trace = trace
@@ -150,9 +179,26 @@ class BrokerEngine:
         self._visible_positions: dict[str, dict[str, Any]] = {}
         self.instrument_tokens: dict[str, int] = {}
         self.fees_paid = Decimal("0")
+        self.fee_components_paid: dict[str, Decimal] = {
+            name: Decimal("0")
+            for name in (
+                "brokerage",
+                "exchange",
+                "stt",
+                "sebi",
+                "gst",
+                "stamp_duty",
+                "dp",
+                "ipft",
+            )
+        }
         self.realized_pnl = Decimal("0")
         self._brokerage_charged_orders: set[str] = set()
         self.fill_events: list[dict[str, Any]] = []
+        self.fee_events: list[dict[str, Any]] = []
+        self.capital_tracking = capital_tracking
+        self.full_precision_fees = full_precision_fees
+        self.capital_snapshots: list[dict[str, Any]] = []
         self.exchange_session_open = True
         self.day_cancellation_count = 0
         self.post_close_rejection_count = 0
@@ -562,6 +608,42 @@ class BrokerEngine:
     def mark_to_market(self, symbol: str, price: Decimal) -> None:
         self._mark_to_market(symbol, price)
 
+    def capital_snapshot(self, at: dt.datetime) -> dict[str, Any]:
+        from .capital import calculate_capital_snapshot
+
+        symbols = set(self.positions_by_symbol)
+        symbols.update(
+            order.symbol
+            for order in self.orders_by_id.values()
+            if order.status in {"ACK", "OPEN", "PARTIAL"}
+        )
+        marks = {
+            symbol: mark
+            for symbol in symbols
+            if (mark := self._latest_mark_for_symbol(symbol)) is not None
+        }
+        spot_quote = self.latest_quotes.get("NSE:NIFTY 50")
+        spot = (
+            None
+            if spot_quote is None
+            else Decimal(str(spot_quote["last_price"]))
+        )
+        return calculate_capital_snapshot(
+            at=at.isoformat(),
+            positions=self.positions_by_symbol,
+            orders=self.orders_by_id.values(),
+            option_marks=marks,
+            underlying_spot=spot,
+        )
+
+    def record_capital_snapshot(self) -> None:
+        self._record_capital_snapshot()
+
+    def _record_capital_snapshot(self) -> None:
+        if not self.capital_tracking:
+            return
+        self.capital_snapshots.append(self.capital_snapshot(self.scheduler.now))
+
     def export_persistent_state(self) -> dict[str, Any]:
         if any(
             order.status in {"OPEN", "ACK", "PARTIAL"} and order.validity == "DAY"
@@ -571,6 +653,7 @@ class BrokerEngine:
         return {
             "cash": self.cash,
             "fees_paid": self.fees_paid,
+            "fee_components_paid": copy.deepcopy(self.fee_components_paid),
             "realized_pnl": self.realized_pnl,
             "positions": copy.deepcopy(self.positions_by_symbol),
             "gtts": copy.deepcopy(self.gtts_by_id),
@@ -584,6 +667,13 @@ class BrokerEngine:
     def restore_persistent_state(self, state: dict[str, Any]) -> None:
         self.cash = Decimal(str(state["cash"]))
         self.fees_paid = Decimal(str(state["fees_paid"]))
+        self.fee_components_paid = {
+            name: Decimal(str(value))
+            for name, value in state.get(
+                "fee_components_paid",
+                self.fee_components_paid,
+            ).items()
+        }
         self.realized_pnl = Decimal(str(state["realized_pnl"]))
         self.positions_by_symbol = copy.deepcopy(state["positions"])
         self._visible_positions = copy.deepcopy(state["positions"])
@@ -596,6 +686,8 @@ class BrokerEngine:
         self.orders_by_id = {}
         self.latest_quotes = {}
         self.fill_events = []
+        self.fee_events = []
+        self.capital_snapshots = []
         self.exchange_session_open = True
         self._blocked_symbols = set()
 
@@ -661,6 +753,7 @@ class BrokerEngine:
                 callback_delay,
                 self.visibility.callback_priority,
             )
+        self._record_capital_snapshot()
 
     def _apply_fill(self, order: BrokerOrder, *, quantity: int, price: Decimal, complete: bool) -> None:
         if order.status not in {"OPEN", "PARTIAL"}:
@@ -670,20 +763,40 @@ class BrokerEngine:
         prior_value = order.average_price * order.filled_quantity
         order.filled_quantity += quantity
         order.average_price = (prior_value + price * quantity) / order.filled_quantity
-        include_brokerage = order.order_id not in self._brokerage_charged_orders
-        fee = (
-            self.fee_schedule.calculate(
+        include_brokerage = (
+            self.full_precision_fees
+            or order.order_id not in self._brokerage_charged_orders
+        )
+        fee_breakdown = (
+            self.fee_schedule.calculate_breakdown(
                 side=order.side,
                 quantity=quantity,
                 price=price,
                 include_brokerage=include_brokerage,
             )
             if self.fee_schedule
-            else Decimal("0")
+            else {"total": Decimal("0")}
         )
-        if include_brokerage and self.fee_schedule:
+        fee = (
+            fee_breakdown["total"]
+            if self.full_precision_fees
+            else fee_breakdown["total"].quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        if (
+            include_brokerage
+            and self.fee_schedule
+            and not self.full_precision_fees
+        ):
             self._brokerage_charged_orders.add(order.order_id)
         self.fees_paid += fee
+        for name in self.fee_components_paid:
+            self.fee_components_paid[name] += fee_breakdown.get(
+                name,
+                Decimal("0"),
+            )
         signed = quantity if order.side == "BUY" else -quantity
         self.cash += (-price * quantity if order.side == "BUY" else price * quantity) - fee
         position = self.positions_by_symbol.setdefault(
@@ -740,6 +853,18 @@ class BrokerEngine:
             "complete": complete,
         }
         self.fill_events.append(fill_event)
+        if self.full_precision_fees:
+            self.fee_events.append({
+                "order_id": order.order_id,
+                "at": self.scheduler.now.isoformat(),
+                "side": order.side,
+                "quantity": quantity,
+                "price": str(price),
+                "components": {
+                    name: str(value)
+                    for name, value in fee_breakdown.items()
+                },
+            })
         self.trace.add(
             "BROKER_FILL",
             at=self.scheduler.now,
@@ -767,6 +892,7 @@ class BrokerEngine:
         latest_mark = self._latest_mark_for_symbol(order.symbol)
         if latest_mark is not None:
             self._mark_to_market(order.symbol, latest_mark)
+        self._record_capital_snapshot()
 
     def _mark_to_market(self, symbol: str, price: Decimal) -> None:
         position = self.positions_by_symbol.get(symbol)

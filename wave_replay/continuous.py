@@ -7,13 +7,20 @@ import datetime as dt
 import glob
 import json
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterable
 
 import pyarrow.parquet as pq
 
 from .broker_engine import BrokerEngine, FeeSchedule
+from .capital import (
+    DISCLAIMER as CAPITAL_DISCLAIMER,
+    MODEL_ID as CAPITAL_MODEL_ID,
+    calculate_capital_peaks,
+    calculate_capital_snapshot,
+    calculate_profit_on_peak_capital,
+)
 from .datasets import ReplayDataset, session_segments_for_date
 from .scheduler import DeterministicScheduler
 from .tracing import TraceRecorder
@@ -355,6 +362,12 @@ class ContinuousReplayConfig:
             or int(value.get("schema_version", 0)) != 1
         ):
             raise SchemaError("Unsupported continuous replay config")
+        experiment_id = value.get("experiment_id")
+        if experiment and (
+            not isinstance(experiment_id, str)
+            or not experiment_id.strip()
+        ):
+            raise SchemaError("Experiment schema requires a non-empty experiment_id")
         strategy = dict(value.get("strategy", {}))
         approved = {
             "trigger_mode": "close_only",
@@ -380,6 +393,21 @@ class ContinuousReplayConfig:
             raise SchemaError(
                 f"Continuous strategy settings contradict approved profile: {contradictions}"
             )
+        experimental_keys = {
+            "buy_gap_pct",
+            "sell_gap_pct",
+            "selection_min_premium",
+            "selection_max_premium",
+            "selection_target_premium",
+            "keep_min_premium",
+            "keep_max_premium",
+            "pre_expiry_exit_dte",
+        }
+        if not experiment and experimental_keys & set(strategy):
+            raise SchemaError(
+                "Experiment strategy overrides require "
+                "schema=wave-replay-continuous-experiment-v1"
+            )
         resolved_wave_settings = copy.deepcopy(wave_settings)
         if experiment:
             _deep_update(
@@ -398,28 +426,28 @@ class ContinuousReplayConfig:
                 if experiment and value.get("experiment_id")
                 else None
             ),
-            buy_gap_pct=Decimal(str(strategy.get("buy_gap_pct", "0.10"))),
-            sell_gap_pct=Decimal(str(strategy.get("sell_gap_pct", "0.10"))),
+            buy_gap_pct=Decimal(str(strategy.get("buy_gap_pct", "0.10"))) if experiment else Decimal("0.10"),
+            sell_gap_pct=Decimal(str(strategy.get("sell_gap_pct", "0.10"))) if experiment else Decimal("0.10"),
             selection_min_premium=Decimal(
-                str(strategy.get("selection_min_premium", "35"))
+                str(strategy.get("selection_min_premium", "35") if experiment else "35")
             ),
             selection_max_premium=Decimal(
-                str(strategy.get("selection_max_premium", "65"))
+                str(strategy.get("selection_max_premium", "65") if experiment else "65")
             ),
             selection_target_premium=Decimal(
-                str(strategy.get("selection_target_premium", "50"))
+                str(strategy.get("selection_target_premium", "50") if experiment else "50")
             ),
             keep_min_premium=Decimal(
-                str(strategy.get("keep_min_premium", "35"))
+                str(strategy.get("keep_min_premium", "35") if experiment else "35")
             ),
             keep_max_premium=Decimal(
-                str(strategy.get("keep_max_premium", "65"))
+                str(strategy.get("keep_max_premium", "65") if experiment else "65")
             ),
             minimum_calendar_dte=int(
-                strategy.get("minimum_calendar_dte", 2)
+                strategy.get("minimum_calendar_dte", 2) if experiment else 2
             ),
             pre_expiry_exit_dte=int(
-                strategy.get("pre_expiry_exit_dte", 1)
+                strategy.get("pre_expiry_exit_dte", 1) if experiment else 1
             ),
         )
 
@@ -485,6 +513,7 @@ class ContinuousWaveRunner:
         held_identity = None
         trace = ContinuousTrace()
         equity_curve: list[dict[str, Any]] = []
+        capital_curve: list[dict[str, Any]] = []
         sessions: list[dict[str, Any]] = []
         rolls: list[dict[str, Any]] = []
         overnight: list[dict[str, Any]] = []
@@ -545,6 +574,16 @@ class ContinuousWaveRunner:
                     )
                     sessions.append(unavailable)
                     equity_curve.extend(unavailable["equity_curve"])
+                    if self.config.experiment_id is not None:
+                        capital_curve.append(
+                            calculate_capital_snapshot(
+                                at=unavailable["equity_curve"][0]["at"],
+                                positions=persistent_state["positions"],
+                                orders=[],
+                                option_marks={},
+                                underlying_spot=None,
+                            )
+                        )
                     no_trade_days.append({
                         "session_date": session_date.isoformat(),
                         "reason": "held_contract_quote_unavailable",
@@ -597,10 +636,20 @@ class ContinuousWaveRunner:
                         held_contract,
                         held_option,
                         reason=(
-                            "held_expiry_below_minimum_dte"
+                            (
+                                "held_expiry_below_minimum_dte"
+                                if self.config.experiment_id is not None
+                                else "held_expiry_below_2_dte"
+                            )
                             if held_dte < self.config.minimum_calendar_dte
                             else "held_premium_outside_35_65"
                         ),
+                        full_precision_fees=(
+                            self.config.experiment_id is not None
+                        ),
+                    )
+                    capital_curve.extend(
+                        switch.get("capital_snapshots", [])
                     )
                     trace.append_session(session_date, switch_trace.events)
                     switch_events.append(switch)
@@ -660,6 +709,16 @@ class ContinuousWaveRunner:
                     "qualifying_candidates": decision["qualifying_candidates"],
                 })
                 equity_curve.extend(no_trade["equity_curve"])
+                if self.config.experiment_id is not None:
+                    capital_curve.append(
+                        calculate_capital_snapshot(
+                            at=no_trade["equity_curve"][0]["at"],
+                            positions=persistent_state["positions"],
+                            orders=[],
+                            option_marks={},
+                            underlying_spot=None,
+                        )
+                    )
                 held_identity = None
                 del dataset
                 continue
@@ -726,6 +785,7 @@ class ContinuousWaveRunner:
                 *report["data_quality"]["missing_quote_decisions"],
             ]
             equity_curve.extend(report["equity_curve"])
+            capital_curve.extend(report.get("capital_curve", []))
             session_summary = _session_summary(report, contract, session_date)
             session_summary["contract_decision"] = decision
             session_summary["time_without_contract_seconds"] = time_without_contract
@@ -766,8 +826,23 @@ class ContinuousWaveRunner:
             dates[-1],
             persistent_state,
             starting_cash,
+            full_precision_fees=self.config.experiment_id is not None,
         )
         del final_dataset
+        capital_peaks = (
+            calculate_capital_peaks(capital_curve)
+            if self.config.experiment_id is not None
+            else {}
+        )
+        capital_profit = (
+            calculate_profit_on_peak_capital(
+                monthly_profit=Decimal(str(forced_close["pnl"])),
+                peaks=capital_peaks,
+            )
+            if self.config.experiment_id is not None
+            and forced_close.get("pnl") is not None
+            else {}
+        )
         missing_events = [
             {
                 "session_date": item["session_date"],
@@ -791,8 +866,8 @@ class ContinuousWaveRunner:
                 "trigger_mode": "close_only",
                 "activation_policy": "subsequent_bar",
                 "fill_price_mode": "limit",
-                "buy_gap_pct": str(self.config.buy_gap_pct),
-                "sell_gap_pct": str(self.config.sell_gap_pct),
+                "buy_gap_pct": float(self.config.buy_gap_pct),
+                "sell_gap_pct": float(self.config.sell_gap_pct),
                 "cool_off_mode": "disabled",
                 "same_side_fill_cooldown": "enabled",
                 "broker_fee_model": "upstox_approximation",
@@ -801,8 +876,7 @@ class ContinuousWaveRunner:
                     "owner": "simulator",
                     "not_original_wave": True,
                     "minimum_session_dte": self.config.minimum_calendar_dte,
-                    "pre_expiry_exit_dte": self.config.pre_expiry_exit_dte,
-                    "carry_into_pre_expiry_session": False,
+                    "carry_into_one_dte_session": False,
                     "liquidation_mark": "15:29_available_completed_minute_close",
                     "next_session_source": "authoritative_collection_calendar",
                     "overlap_allowed": False,
@@ -835,7 +909,6 @@ class ContinuousWaveRunner:
                 "fees": str(persistent_state["fees_paid"]),
                 "positions": ending_positions,
             },
-            "experiment": self.config.experiment_mapping(),
             "activity": {
                 "orders": sum(item["orders"] for item in sessions),
                 "fills": sum(item["fills"] for item in sessions),
@@ -942,6 +1015,61 @@ class ContinuousWaveRunner:
                 ),
             },
         }
+        if self.config.experiment_id is not None:
+            report["experiment"] = self.config.experiment_mapping()
+            report["capital"] = {
+                "model_id": CAPITAL_MODEL_ID,
+                "disclaimer": CAPITAL_DISCLAIMER,
+                "curve": capital_curve,
+                "peaks": capital_peaks,
+                "profit_on_peak_capital": capital_profit,
+            }
+            report["fee_audit"] = {
+                "model_id": "upstox_latest_2026_04_full_precision",
+                "broker_fidelity": "not_zerodha",
+                "components": {
+                    name: str(value)
+                    for name, value in persistent_state[
+                        "fee_components_paid"
+                    ].items()
+                },
+                "full_precision_total": str(persistent_state["fees_paid"]),
+                "rounded_component_total": str(
+                    sum(
+                        (
+                            Decimal(str(value)).quantize(
+                                Decimal("0.01"),
+                                rounding=ROUND_HALF_UP,
+                            )
+                            for value in persistent_state[
+                                "fee_components_paid"
+                            ].values()
+                        ),
+                        Decimal("0"),
+                    )
+                ),
+                "events": [
+                    {**event, "session_date": session["session_date"]}
+                    for session in sessions
+                    for event in session.get("fee_events", [])
+                ],
+                "forced_close": {
+                    "components": forced_close.get(
+                        "exit_fee_components",
+                        {},
+                    ),
+                    "exit_fees": forced_close.get("exit_fees"),
+                    "total_fees": forced_close.get("total_fees"),
+                    "reconciles": (
+                        Decimal(str(persistent_state["fees_paid"]))
+                        + Decimal(str(forced_close.get("exit_fees", 0)))
+                        == Decimal(str(forced_close.get("total_fees", 0)))
+                    ),
+                },
+            }
+            report["settings"]["roll_policy"]["pre_expiry_exit_dte"] = (
+                self.config.pre_expiry_exit_dte
+            )
         report["trace_digest"] = trace.digest()
         report["report_hash"] = state_hash(report)
         return report, trace
@@ -995,6 +1123,17 @@ def _continuous_scenario(
     option_bar,
     config: ContinuousReplayConfig,
 ) -> ReplayScenario:
+    replay = {
+        "min_calendar_dte": 2,
+        "selection_policy": "nearest_expiry_strict_otm_premium_35_65_target_50",
+    }
+    if config.experiment_id is not None:
+        replay.update({
+            "min_calendar_dte": config.minimum_calendar_dte,
+            "buy_gap_pct": str(config.buy_gap_pct),
+            "sell_gap_pct": str(config.sell_gap_pct),
+            "capital_model": CAPITAL_MODEL_ID,
+        })
     return ReplayScenario(
         scenario_id=f"continuous-{session_date.isoformat()}-{contract.instrument_token}",
         selected_date=session_date,
@@ -1022,12 +1161,7 @@ def _continuous_scenario(
         broker_script=copy.deepcopy(
             config.session_broker_scripts.get(session_date.isoformat(), [])
         ),
-        replay={
-            "min_calendar_dte": config.minimum_calendar_dte,
-            "selection_policy": "nearest_expiry_strict_otm_premium_35_65_target_50",
-            "buy_gap_pct": str(config.buy_gap_pct),
-            "sell_gap_pct": str(config.sell_gap_pct),
-        },
+        replay=replay,
         initial_cash=config.initial_cash,
     )
 
@@ -1196,6 +1330,19 @@ def _empty_persistent_state(starting_cash: Decimal) -> dict[str, Any]:
     return {
         "cash": starting_cash,
         "fees_paid": Decimal("0"),
+        "fee_components_paid": {
+            name: Decimal("0")
+            for name in (
+                "brokerage",
+                "exchange",
+                "stt",
+                "sebi",
+                "gst",
+                "stamp_duty",
+                "dp",
+                "ipft",
+            )
+        },
         "realized_pnl": Decimal("0"),
         "positions": {},
         "gtts": {},
@@ -1214,6 +1361,7 @@ def _close_at_opening_switch(
     option_bar,
     *,
     reason: str,
+    full_precision_fees: bool = False,
 ) -> tuple[dict[str, Any], TraceRecorder, dict[str, Any]]:
     trace = TraceRecorder()
     scheduler = DeterministicScheduler(start=option_bar.bar_end, trace=trace)
@@ -1221,9 +1369,29 @@ def _close_at_opening_switch(
         scheduler=scheduler,
         trace=trace,
         fee_schedule=FeeSchedule(dataset.fee_schedule),
+        full_precision_fees=full_precision_fees,
+        capital_tracking=full_precision_fees,
     )
     engine.restore_persistent_state(persistent_state)
     engine.open_exchange_session()
+    underlying_bar = next(
+        bar
+        for bar in dataset.underlying_bars
+        if bar.session_date == option_bar.session_date
+        and bar.bar_end == option_bar.bar_end
+        and not bar.missing_bar
+    )
+    engine.set_quote(
+        "NSE:NIFTY 50",
+        last_price=underlying_bar.close,
+        instrument_token=underlying_bar.replay_instrument_token,
+    )
+    engine.set_quote(
+        f"{contract.exchange}:{contract.wave_trading_symbol}",
+        last_price=option_bar.close,
+        instrument_token=contract.instrument_token,
+    )
+    engine.record_capital_snapshot()
     for trigger in list(engine.gtts_by_id.values()):
         if trigger.status == "active" and trigger.symbol == contract.wave_trading_symbol:
             engine.delete_gtt(trigger.trigger_id)
@@ -1269,11 +1437,13 @@ def _close_at_opening_switch(
             {**fill, "symbol": contract.wave_trading_symbol}
             for fill in engine.fill_events
         ],
+        "fee_events": list(engine.fee_events),
         "ending_cash": str(engine.cash),
         "ending_equity": str(engine.current_equity()),
         "ending_realized_pnl": str(engine.realized_pnl),
         "ending_unrealized_pnl": str(_unrealized(engine.positions_by_symbol)),
         "cumulative_fees": str(engine.fees_paid),
+        "capital_snapshots": list(engine.capital_snapshots),
     }
     trace.add(
         "CONTINUOUS_CONTRACT_SWITCH_CLOSE",
@@ -1337,6 +1507,7 @@ def _flat_session_summary(
         "last_multiplier_info": None,
         "trades": [],
         "fill_events": [],
+        "fee_events": [],
         "ending_open_orders": [],
         "missing_quote_decisions": [],
         "active_gtts": sum(
@@ -1494,6 +1665,7 @@ def _unavailable_held_session_summary(
         "last_multiplier_info": None,
         "trades": [],
         "fill_events": [],
+        "fee_events": [],
         "ending_open_orders": [],
         "missing_quote_decisions": [decision],
         "active_gtts": sum(
@@ -1513,6 +1685,7 @@ def _merge_switch_activity(
     session["fills"] += int(switch["fills"])
     session["trades"] = [*switch["trades"], *session["trades"]]
     session["fill_events"] = [*switch["fill_events"], *session["fill_events"]]
+    session["fee_events"] = [*switch["fee_events"], *session["fee_events"]]
 
 
 def _selection_failure_reason(candidates: list[dict[str, Any]]) -> str:
@@ -1590,6 +1763,7 @@ def _session_summary(
             {**fill, "symbol": contract.wave_trading_symbol}
             for fill in report["activity"]["fill_events"]
         ],
+        "fee_events": list(report["fees"].get("events", [])),
         "ending_open_orders": report["account"]["open_orders"],
         "missing_quote_decisions": report["data_quality"]["missing_quote_decisions"],
         "active_gtts": len(report["account"]["open_gtts"]),
@@ -1802,6 +1976,8 @@ def _forced_close_sensitivity(
     session_date: dt.date,
     persistent_state: dict[str, Any],
     starting_cash: Decimal,
+    *,
+    full_precision_fees: bool = False,
 ) -> dict[str, Any]:
     from .broker_engine import FeeSchedule
 
@@ -1809,6 +1985,19 @@ def _forced_close_sensitivity(
     realized = Decimal(str(persistent_state["realized_pnl"]))
     existing_fees = Decimal(str(persistent_state["fees_paid"]))
     exit_fees = Decimal("0")
+    exit_fee_components = {
+        name: Decimal("0")
+        for name in (
+            "brokerage",
+            "exchange",
+            "stt",
+            "sebi",
+            "gst",
+            "stamp_duty",
+            "dp",
+            "ipft",
+        )
+    }
     exits = []
     unavailable_symbols = []
     fee_schedule = FeeSchedule(dataset.fee_schedule)
@@ -1836,10 +2025,18 @@ def _forced_close_sensitivity(
         bar = max(bars, key=lambda item: item.bar_end)
         side = "SELL" if quantity > 0 else "BUY"
         absolute = abs(quantity)
-        fee = fee_schedule.calculate(
+        fee_breakdown = fee_schedule.calculate_breakdown(
             side=side,
             quantity=absolute,
             price=bar.close,
+        )
+        fee = (
+            fee_breakdown["total"]
+            if full_precision_fees
+            else fee_breakdown["total"].quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
         )
         cash += (
             bar.close * absolute
@@ -1854,6 +2051,8 @@ def _forced_close_sensitivity(
         )
         realized += realized_delta
         exit_fees += fee
+        for name in exit_fee_components:
+            exit_fee_components[name] += fee_breakdown[name]
         exits.append({
             "symbol": symbol,
             "side": side,
@@ -1861,6 +2060,10 @@ def _forced_close_sensitivity(
             "price": str(bar.close),
             "at": bar.bar_end.isoformat(),
             "exit_fee": str(fee),
+            "fee_components": {
+                name: str(value)
+                for name, value in fee_breakdown.items()
+            },
             "realized_pnl": str(realized_delta),
         })
     complete = not unavailable_symbols
@@ -1875,6 +2078,10 @@ def _forced_close_sensitivity(
         "unrealized_pnl": "0" if complete else None,
         "existing_fees": str(existing_fees),
         "exit_fees": str(exit_fees),
+        "exit_fee_components": {
+            name: str(value)
+            for name, value in exit_fee_components.items()
+        },
         "total_fees": str(existing_fees + exit_fees),
         "pnl": str(cash - starting_cash) if complete else None,
     }

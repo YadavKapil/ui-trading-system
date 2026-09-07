@@ -627,6 +627,7 @@ h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0 0 10px}} .sub,.meta,.n
 {_metric_card("Skipped minutes", report["missing_data_summary"]["skipped_minutes"], "")}
 {_metric_card("Max inventory", report["inventory"]["max_total_absolute_quantity"], "")}
 {_metric_card("Ending position", sum(abs(int(v["quantity"])) for v in account["positions"].values()), "")}
+{_capital_metric_cards(report)}
 </section>
 <section class="panel wide"><h2>NIFTY and selected option path</h2>
 <div class="legend"><span><i class="dot" style="background:var(--blue)"></i>NIFTY</span><span><i class="dot" style="background:var(--amber)"></i>Selected option</span><span><i class="dot" style="background:#4da3ff"></i>BUY</span><span><i class="dot" style="background:#f59e0b"></i>SELL</span><span><i class="dot" style="background:var(--green)"></i>Selection</span><span><i class="dot" style="background:var(--purple)"></i>Switch/roll</span></div>
@@ -636,6 +637,7 @@ h1{{font-size:22px;margin:0}} h2{{font-size:15px;margin:0 0 10px}} .sub,.meta,.n
 <section class="panel"><h2>Realized / unrealized P&L and fees</h2><div id="pnl-chart" class="chart"></div></section>
 <section class="panel"><h2>Absolute inventory after fills</h2><div id="inventory-chart" class="small-chart"></div></section>
 <section class="panel"><h2>Boundary MTM vs forced-close sensitivity</h2>{_comparison_table(report)}</section></div>
+{_capital_section(report)}
 <div class="tables"><section class="panel"><h2>Annual summary</h2>{_period_table(report["summaries"]["annual"])}</section><section class="panel"><h2>Monthly summary</h2>{_period_table(report["summaries"]["monthly"])}</section></div>
 <section class="panel meta"><h2>Reproducibility</h2><div>Collection: <code>{html.escape(str(metadata["collection_id"]))}</code></div><div>Collection SHA: <code>{html.escape(str(metadata["collection_sha256"]))}</code></div><div>Simulator: <code>{html.escape(str(metadata["simulator_commit"]))}</code></div><div>Trace digest: <code>{html.escape(str(metadata["trace_digest"]))}</code></div><div>Report hash: <code>{html.escape(str(metadata["report_hash"]))}</code></div><div>Range: {html.escape(str(metadata["range"]["start"]))} → {html.escape(str(metadata["range"]["end"]))}</div><p class="note">Offline self-contained report. Continuous lines are deterministically min/max downsampled; every fill, selection, switch, roll, missing marker, and session boundary is retained. Prices and timestamps use completed-minute availability in IST. {disclosure}</p></section>
 </main>
@@ -697,6 +699,8 @@ def _metric_card(label: str, value: Any, kind: str) -> str:
         rendered = f"{'-' if amount < 0 else ''}₹{abs(amount):,.2f}"
     elif kind == "ratio":
         rendered = f"{Decimal(str(value)) * 100:.2f}%"
+    elif kind == "percent":
+        rendered = f"{Decimal(str(value)):.2f}%"
     else:
         rendered = str(value)
     return f'<div class="card"><div class="label">{html.escape(label)}</div><div class="value">{html.escape(rendered)}</div></div>'
@@ -730,6 +734,100 @@ def _comparison_table(report: dict[str, Any]) -> str:
         for label, left, right in rows
     )
     return f"<table><thead><tr><th>Metric</th><th>Boundary MTM</th><th>Forced close</th></tr></thead><tbody>{body}</tbody></table>"
+
+
+def _capital_metric_cards(report: dict[str, Any]) -> str:
+    capital = report.get("capital")
+    if not capital:
+        return ""
+    peaks = capital["peaks"]
+    profit = capital["profit_on_peak_capital"]
+    return "".join([
+        _metric_card(
+            "Peak capital ex-margin",
+            _peak_value(peaks, "capital_used_excluding_margin"),
+            "INR",
+        ),
+        _metric_card(
+            "Peak capital incl-margin",
+            _peak_value(peaks, "capital_used_including_margin"),
+            "INR",
+        ),
+        _metric_card(
+            "Peak recommended capital",
+            _peak_value(peaks, "capital_recommended"),
+            "INR",
+        ),
+        _metric_card(
+            "Monthly return ex-margin",
+            profit.get("monthly_profit_pct_excluding_margin"),
+            "percent",
+        ),
+        _metric_card(
+            "Monthly return incl-margin",
+            profit.get("monthly_profit_pct_including_margin"),
+            "percent",
+        ),
+        _metric_card(
+            "Annualized incl-margin",
+            profit.get("annualized_profit_pct_including_margin"),
+            "percent",
+        ),
+    ])
+
+
+def _capital_section(report: dict[str, Any]) -> str:
+    capital = report.get("capital")
+    if not capital:
+        return ""
+    peaks = capital["peaks"]
+    profit = capital["profit_on_peak_capital"]
+    rows = []
+    for label, key in (
+        ("Capital used excluding margin", "capital_used_excluding_margin"),
+        ("Capital used including margin", "capital_used_including_margin"),
+        ("Capital recommended", "capital_recommended"),
+    ):
+        peak = peaks.get(key)
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(label)}</td>"
+            f"<td>{html.escape(_format_table_value(None if peak is None else peak['value']))}</td>"
+            f"<td>{html.escape('N/A' if peak is None else peak['at'])}</td>"
+            f"<td>{html.escape('N/A' if peak is None else str(peak['projected_short_qty']))}</td>"
+            "</tr>"
+        )
+    return (
+        '<section class="panel wide"><h2>Crude naked-option capital model</h2>'
+        f'<p class="note"><strong>{html.escape(capital["model_id"])}</strong> — '
+        f'{html.escape(capital["disclaimer"])}. Peak denominator is the maximum '
+        'observed during the month.</p>'
+        '<table><thead><tr><th>Metric</th><th>Peak value</th><th>Timestamp</th>'
+        '<th>Projected short qty</th></tr></thead><tbody>'
+        + "".join(rows)
+        + "</tbody></table>"
+        '<p class="note">Monthly forced-close profit: '
+        + html.escape(_format_table_value(profit.get("monthly_profit")))
+        + "; monthly return ex-margin "
+        + html.escape(_format_percent(profit.get("monthly_profit_pct_excluding_margin")))
+        + "; monthly return incl-margin "
+        + html.escape(_format_percent(profit.get("monthly_profit_pct_including_margin")))
+        + "; simple linear annualized ex-margin "
+        + html.escape(_format_percent(profit.get("annualized_profit_pct_excluding_margin")))
+        + "; incl-margin "
+        + html.escape(_format_percent(profit.get("annualized_profit_pct_including_margin")))
+        + ". This is in-sample_linear_annualized (monthly percentage ×12), not CAGR."
+        "</p></section>"
+    )
+
+
+def _peak_value(peaks: dict[str, Any], name: str) -> Any:
+    peak = peaks.get(name)
+    return None if peak is None else peak["value"]
+
+
+def _format_percent(value: Any) -> str:
+    return "N/A" if value is None else f"{Decimal(str(value)):.4f}%"
 
 
 def _format_table_value(value: Any) -> str:

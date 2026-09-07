@@ -3,6 +3,7 @@ from pathlib import Path
 
 from wave_replay.dashboard import (
     _build_payload,
+    _capital_section,
     _collect_trace_data,
     _downsample,
     generate_continuous_dashboard,
@@ -337,3 +338,41 @@ def test_provisional_trace_dashboard_does_not_require_final_report(tmp_path):
     assert "Equity, drawdown" in rendered
     assert result["sessions"] == 1
     assert result["fill_markers"] == 1
+
+
+def test_dashboard_capital_section_discloses_model_and_annualization():
+    report = {
+        "capital": {
+            "model_id": "crude_naked_option_margin_v1",
+            "disclaimer": "not Zerodha/NSE SPAN; no cross-contract offsets",
+            "peaks": {
+                "capital_used_excluding_margin": {
+                    "value": "10000",
+                    "at": "2026-01-05T10:00:00+05:30",
+                    "projected_short_qty": 0,
+                },
+                "capital_used_including_margin": {
+                    "value": "180000",
+                    "at": "2026-01-05T10:00:00+05:30",
+                    "projected_short_qty": 65,
+                },
+                "capital_recommended": {
+                    "value": "198000",
+                    "at": "2026-01-05T10:00:00+05:30",
+                    "projected_short_qty": 65,
+                },
+            },
+            "profit_on_peak_capital": {
+                "monthly_profit": "1800",
+                "monthly_profit_pct_excluding_margin": "18",
+                "monthly_profit_pct_including_margin": "1",
+                "annualized_profit_pct_excluding_margin": "216",
+                "annualized_profit_pct_including_margin": "12",
+            },
+        }
+    }
+    rendered = _capital_section(report)
+    assert "crude_naked_option_margin_v1" in rendered
+    assert "not Zerodha/NSE SPAN" in rendered
+    assert "in-sample_linear_annualized" in rendered
+    assert "12.0000%" in rendered

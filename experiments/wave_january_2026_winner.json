@@ -1,0 +1,17 @@
+{
+  "schema": "wave-replay-continuous-experiment-v1",
+  "schema_version": 1,
+  "experiment_id": "sym-gap-020-cooldown1",
+  "strategy": {
+    "buy_gap_pct": "0.20",
+    "sell_gap_pct": "0.20"
+  },
+  "wave_settings_overrides": {
+    "fill_cooldown": {
+      "enabled": true,
+      "trigger_count": 1,
+      "window_minutes": 10,
+      "cooldown_duration_minutes": 30
+    }
+  }
+}

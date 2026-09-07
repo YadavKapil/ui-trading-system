@@ -281,6 +281,8 @@ def _run_continuous_replay(args) -> int:
         default_start=args.start,
         default_end=args.end,
     )
+    if args.compact and config.experiment_id is None:
+        raise ValueError("--compact requires an experiment config with experiment_id")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     digests = []
@@ -346,6 +348,17 @@ def _compact_experiment_manifest(
     args,
 ) -> dict:
     forced = report["forced_close_sensitivity"]
+    repository_root = Path(args.repository_root).resolve()
+    dirty = subprocess.check_output(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        cwd=repository_root,
+        text=True,
+    ).strip()
     return {
         "schema": "wave-replay-january-experiment-result-v1",
         "experiment_id": config.experiment_id,
@@ -353,8 +366,10 @@ def _compact_experiment_manifest(
         "resolved_parameters": config.experiment_mapping(),
         "code_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
+            cwd=repository_root,
             text=True,
         ).strip(),
+        "code_dirty": bool(dirty),
         "collection_id": collection.to_manifest()["collection_id"],
         "collection_sha256": collection.to_manifest()["collection_sha256"],
         "requested_range": report["requested_range"],
@@ -382,6 +397,33 @@ def _compact_experiment_manifest(
                 and forced.get("unrealized_pnl") == "0"
             ),
         },
+        "capital": (
+            {
+                key: value
+                for key, value in report.get("capital", {}).items()
+                if key != "curve"
+            }
+            or None
+        ),
+        "peak_capital_used_excluding_margin": (
+            report.get("capital", {})
+            .get("peaks", {})
+            .get("capital_used_excluding_margin")
+        ),
+        "peak_capital_used_including_margin": (
+            report.get("capital", {})
+            .get("peaks", {})
+            .get("capital_used_including_margin")
+        ),
+        "peak_capital_recommended": (
+            report.get("capital", {})
+            .get("peaks", {})
+            .get("capital_recommended")
+        ),
+        "profit_on_peak_capital": (
+            report.get("capital", {}).get("profit_on_peak_capital")
+        ),
+        "fee_audit": report.get("fee_audit"),
     }
 
 
