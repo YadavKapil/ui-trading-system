@@ -37,6 +37,7 @@ from .scheduler import DeterministicScheduler
 from .selector import build_scenarios, load_saved_wave_settings
 from .synthetic import create_synthetic_dataset
 from .tasks import SimTaskRuntime
+from .trade_dashboard import generate_trade_episode_dashboard
 from .tracing import TraceRecorder
 
 
@@ -96,6 +97,21 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard.add_argument("--max-points", type=int, default=8_000)
     dashboard.add_argument("--provisional-trace-only", action="store_true")
     dashboard.add_argument("--collection-manifest")
+
+    trade_dashboard = subparsers.add_parser("render-trade-dashboard")
+    trade_dashboard.add_argument("--report", required=True)
+    trade_dashboard.add_argument("--trace", required=True)
+    trade_dashboard.add_argument("--output", required=True)
+    trade_dashboard.add_argument(
+        "--chart-asset",
+        default="static/vendor/lightweight-charts/4.1.0/lightweight-charts.standalone.production.js",
+    )
+    trade_dashboard.add_argument(
+        "--title",
+        default="Wave Individual Trade Episodes",
+    )
+    trade_dashboard.add_argument("--simulator-commit", required=True)
+    trade_dashboard.add_argument("--max-points", type=int, default=8_000)
 
     compare = subparsers.add_parser("compare")
     compare.add_argument("--expected", required=True)
@@ -187,6 +203,18 @@ def main(argv: list[str] | None = None) -> int:
                 title=args.title,
                 max_points=args.max_points,
             )
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if args.command == "render-trade-dashboard":
+        result = generate_trade_episode_dashboard(
+            report_path=args.report,
+            trace_path=args.trace,
+            output_path=args.output,
+            chart_asset_path=args.chart_asset,
+            simulator_commit=args.simulator_commit,
+            title=args.title,
+            max_points=args.max_points,
+        )
         print(json.dumps(result, sort_keys=True))
         return 0
     if args.command == "compare":
