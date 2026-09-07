@@ -1,0 +1,449 @@
+{
+  "schema": "wave-replay-january-optimization-summary-v2",
+  "code_commit": "c6d92ccc54cdd53df04631fc52b2a1ce447867c4",
+  "collection_id": "wave-collection-v1-5c621b349ef387682826",
+  "collection_sha256": "5d13f85292be6f2d802f874b7246c79ebda0ec9944a762f7791caf6451ec1f9e",
+  "tuning_period": {
+    "start": "2026-01-01",
+    "end": "2026-01-31",
+    "classification": "in_sample"
+  },
+  "acceptance": {
+    "forced_close_pnl_after_all_fees": "> 0",
+    "minimum_fills": 10,
+    "forced_close_exposure": "flat",
+    "ranking": [
+      "forced_close_pnl",
+      "max_drawdown",
+      "fees"
+    ]
+  },
+  "capital_model": {
+    "model_id": "crude_naked_option_margin_v1",
+    "disclaimer": "not Zerodha/NSE SPAN; no cross-contract offsets",
+    "filled_net_long_qty": "max(filled_buy_qty - filled_sell_qty, 0), per exact contract",
+    "conservative_projected_short_qty": "max(filled_sell_qty - filled_buy_qty + pending_sell_qty, 0), per exact contract",
+    "capital_used_excluding_margin": "sum(filled_net_long_qty * synchronized_option_mark) + sum(pending_buy_qty * buy_limit)",
+    "estimated_naked_margin": "0.10 * synchronized_underlying_spot * sum(conservative_projected_short_qty)",
+    "capital_used_including_margin": "capital_used_excluding_margin + estimated_naked_margin",
+    "capital_recommended": "1.10 * capital_used_including_margin",
+    "policy": "report_only",
+    "missing_data_policy": "unavailable; no stale fallback"
+  },
+  "fee_model": {
+    "model_id": "upstox_latest_2026_04_full_precision",
+    "broker_fidelity": "not_zerodha",
+    "formula": {
+      "brokerage": "INR 20 per nonzero fill",
+      "exchange": "turnover * 0.00053",
+      "stt": "SELL turnover * 0.0015",
+      "sebi": "turnover * 0.000001",
+      "stamp_duty": "BUY turnover * 0.00003",
+      "gst": "0.18 * (brokerage + exchange + sebi)",
+      "dp": "0",
+      "ipft": "0"
+    },
+    "precision": "full precision internally",
+    "parity_fixtures": {
+      "option_round_trip_75_buy_100_sell_120": {
+        "brokerage": "40",
+        "stt": "13.50",
+        "exchange": "8.745",
+        "rounded_component_total": "71.28",
+        "full_precision_total": "71.26357000"
+      },
+      "bear_call_entry": "56.6450857150",
+      "bear_call_exit": "55.4326201750"
+    }
+  },
+  "trace_hash_semantics": {
+    "trace_digest": "SHA256 of canonical logical JSONL with LF separators",
+    "trace_file_sha256": "SHA256 of persisted Windows JSONL bytes with CRLF separators"
+  },
+  "ranking": [
+    {
+      "rank": 1,
+      "experiment_id": "sym-gap-020-cooldown1",
+      "forced_close_pnl": "1413.270767000000",
+      "fills": 95,
+      "max_drawdown": "-19076.919622670000",
+      "fees": "2777.929233000000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "828031.750",
+      "peak_capital_recommended": "910834.92500",
+      "monthly_profit_pct_excluding_margin": "4.143346898508915430936926478",
+      "monthly_profit_pct_including_margin": "0.1706783305108771493363630078",
+      "annualized_profit_pct_excluding_margin": "49.72016278210698517124311774",
+      "annualized_profit_pct_including_margin": "2.048139966130525792036356094",
+      "accepted": true
+    },
+    {
+      "rank": 2,
+      "experiment_id": "sym-gap-020-band-40-60",
+      "forced_close_pnl": "410.038716060000",
+      "fills": 98,
+      "max_drawdown": "-18526.581562565000",
+      "fees": "2877.661283940000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "828381.1250",
+      "peak_capital_recommended": "911219.237500",
+      "monthly_profit_pct_excluding_margin": "1.202128199440623405864659009",
+      "monthly_profit_pct_including_margin": "0.04949879997084675245346759923",
+      "annualized_profit_pct_excluding_margin": "14.42553839328748087037590811",
+      "annualized_profit_pct_including_margin": "0.5939855996501610294416111908",
+      "accepted": true
+    },
+    {
+      "rank": 3,
+      "experiment_id": "sym-gap-020",
+      "forced_close_pnl": "-547.621108700000",
+      "fills": 101,
+      "max_drawdown": "-19484.241387325000",
+      "fees": "2951.321108700000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "828381.1250",
+      "peak_capital_recommended": "911219.237500",
+      "monthly_profit_pct_excluding_margin": "-1.605484437427805824787302034",
+      "monthly_profit_pct_including_margin": "-0.06610738610201916418605023141",
+      "annualized_profit_pct_excluding_margin": "-19.26581324913366989744762441",
+      "annualized_profit_pct_including_margin": "-0.7932886332242299702326027769",
+      "accepted": false
+    },
+    {
+      "rank": 4,
+      "experiment_id": "sym-gap-020-dte3",
+      "forced_close_pnl": "-547.621108700000",
+      "fills": 101,
+      "max_drawdown": "-19484.241387325000",
+      "fees": "2951.321108700000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "828381.1250",
+      "peak_capital_recommended": "911219.237500",
+      "monthly_profit_pct_excluding_margin": "-1.605484437427805824787302034",
+      "monthly_profit_pct_including_margin": "-0.06610738610201916418605023141",
+      "annualized_profit_pct_excluding_margin": "-19.26581324913366989744762441",
+      "annualized_profit_pct_including_margin": "-0.7932886332242299702326027769",
+      "accepted": false
+    },
+    {
+      "rank": 5,
+      "experiment_id": "sym-gap-020-band-45-55",
+      "forced_close_pnl": "-992.231686140000",
+      "fills": 86,
+      "max_drawdown": "-20969.344857295000",
+      "fees": "2544.431686140000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "718866.2000",
+      "peak_capital_recommended": "790752.820000",
+      "monthly_profit_pct_excluding_margin": "-2.908968454854087143133564355",
+      "monthly_profit_pct_including_margin": "-0.1380273110823683183323962095",
+      "annualized_profit_pct_excluding_margin": "-34.90762145824904571760277226",
+      "annualized_profit_pct_including_margin": "-1.656327732988419819988754514",
+      "accepted": false
+    },
+    {
+      "rank": 6,
+      "experiment_id": "sym-gap-030",
+      "forced_close_pnl": "-1868.137730667000",
+      "fills": 64,
+      "max_drawdown": "-14228.825350832000",
+      "fees": "1859.687730667000",
+      "max_inventory": 195,
+      "peak_capital_excluding_margin": "25582.0500",
+      "peak_capital_including_margin": "539149.6500",
+      "peak_capital_recommended": "593064.615000",
+      "monthly_profit_pct_excluding_margin": "-7.302533341413217470843814315",
+      "monthly_profit_pct_including_margin": "-0.3464970682382896845059623056",
+      "annualized_profit_pct_excluding_margin": "-87.63040009695860965012577178",
+      "annualized_profit_pct_including_margin": "-4.157964818859476214071547667",
+      "accepted": false
+    },
+    {
+      "rank": 7,
+      "experiment_id": "sym-gap-025",
+      "forced_close_pnl": "-3339.266774557000",
+      "fills": 69,
+      "max_drawdown": "-16429.828059172000",
+      "fees": "2004.816774557000",
+      "max_inventory": 195,
+      "peak_capital_excluding_margin": "25582.0500",
+      "peak_capital_including_margin": "690314.300",
+      "peak_capital_recommended": "759345.73000",
+      "monthly_profit_pct_excluding_margin": "-13.05316334913347444790390137",
+      "monthly_profit_pct_including_margin": "-0.4837313633162459476791948247",
+      "annualized_profit_pct_excluding_margin": "-156.6379601896016933748468164",
+      "annualized_profit_pct_including_margin": "-5.804776359794951372150337896",
+      "accepted": false
+    },
+    {
+      "rank": 8,
+      "experiment_id": "sym-gap-015",
+      "forced_close_pnl": "-3946.719924995000",
+      "fills": 127,
+      "max_drawdown": "-20360.988062540000",
+      "fees": "3701.669924995000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "861939.000",
+      "peak_capital_recommended": "948132.90000",
+      "monthly_profit_pct_excluding_margin": "-11.57076912814356159885544747",
+      "monthly_profit_pct_including_margin": "-0.4578885425760987726509648595",
+      "annualized_profit_pct_excluding_margin": "-138.8492295377227391862653696",
+      "annualized_profit_pct_including_margin": "-5.494662510913185271811578314",
+      "accepted": false
+    },
+    {
+      "rank": 9,
+      "experiment_id": "sym-gap-015-cooldown1",
+      "forced_close_pnl": "-4747.214042735000",
+      "fills": 115,
+      "max_drawdown": "-21088.906373115000",
+      "fees": "3371.164042735000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "861939.000",
+      "peak_capital_recommended": "948132.90000",
+      "monthly_profit_pct_excluding_margin": "-13.91761227912247063859229421",
+      "monthly_profit_pct_including_margin": "-0.5507598615139818479033899151",
+      "annualized_profit_pct_excluding_margin": "-167.0113473494696476631075305",
+      "annualized_profit_pct_including_margin": "-6.609118338167782174840678981",
+      "accepted": false
+    },
+    {
+      "rank": 10,
+      "experiment_id": "sym-gap-015-aggressive-scale",
+      "forced_close_pnl": "-7253.307288385000",
+      "fills": 119,
+      "max_drawdown": "-22786.329979060000",
+      "fees": "3439.757288385000",
+      "max_inventory": 260,
+      "peak_capital_excluding_margin": "34109.4000",
+      "peak_capital_including_margin": "718866.2000",
+      "peak_capital_recommended": "790752.820000",
+      "monthly_profit_pct_excluding_margin": "-21.26483399996775082528569837",
+      "monthly_profit_pct_including_margin": "-1.008992673238079631508617320",
+      "annualized_profit_pct_excluding_margin": "-255.1780079996130099034283804",
+      "annualized_profit_pct_including_margin": "-12.10791207885695557810340784",
+      "accepted": false
+    }
+  ],
+  "baseline": {
+    "config": "experiments/wave_january_2026_baseline.json",
+    "boundary_pnl": "-17468.546053638000",
+    "boundary_equity": "982531.453946362000",
+    "forced_close_pnl": "-17501.629038578000",
+    "forced_close_equity": "982498.370961422000",
+    "forced_close_realized_pnl": "-12737.399999999996230",
+    "forced_close_unrealized_pnl": "0",
+    "fees": "4764.229038578000",
+    "fills": 162,
+    "orders": 368,
+    "cancels": 173,
+    "max_drawdown": "-29371.859928713000",
+    "max_inventory": 325,
+    "max_inventory_at": "2026-01-02T15:12:00+05:30",
+    "peak_capital_excluding_margin": {
+      "value": "42636.7500",
+      "at": "2026-01-02T15:29:00+05:30"
+    },
+    "peak_capital_including_margin": {
+      "value": "1034090.200",
+      "at": "2026-01-02T15:28:00+05:30"
+    },
+    "peak_capital_recommended": {
+      "value": "1137499.22000",
+      "at": "2026-01-02T15:28:00+05:30"
+    },
+    "monthly_profit_pct_excluding_margin": "-41.04822491999976546054753235",
+    "monthly_profit_pct_including_margin": "-1.692466386257020905913236582",
+    "annualized_profit_pct_excluding_margin": "-492.5786990399971855265703882",
+    "annualized_profit_pct_including_margin": "-20.30959663508425087095883898",
+    "trace_digest": "9bfe54b17cce7f86bd97e3e62ef28d1ca1870b1e4a58d42fe8bb523651d61816",
+    "repeat_trace_file_sha256": "23682fe963104e58fffe2a155df87fb1e8690c403bc40bb77d57c339df91f7d1",
+    "report_hash": "sha256:ecb577719e4d403b46e92b52595b74639b1b3538141fd5def9f5cc96fd66425e",
+    "report_file_sha256": "2d0626413f49a767e25c9cd7e3d50711d63a75645ac9bed6bf624612cbe7deb0",
+    "repeat_count": 1,
+    "final_head_recheck": true
+  },
+  "winner": {
+    "config": "experiments/wave_january_2026_winner.json",
+    "parameter_hash": "sha256:8ab250b9916ae5a977ea5d20812d9f8fbaef959274ea521889510300ea3d2b12",
+    "boundary_pnl": "1443.983005705000",
+    "boundary_equity": "1001443.983005705000",
+    "boundary_realized_pnl": "1470.95000000000000",
+    "boundary_unrealized_pnl": "2720.25",
+    "forced_close_pnl": "1413.270767000000",
+    "forced_close_equity": "1001413.270767000000",
+    "forced_close_realized_pnl": "4191.20000000000000",
+    "forced_close_unrealized_pnl": "0",
+    "starting_capital_return_pct": "0.1413270767000000",
+    "fills": 95,
+    "orders": 226,
+    "cancels": 95,
+    "fees": {
+      "trading_and_entry": "2747.216994295000",
+      "forced_exit": "30.712238705000",
+      "total": "2777.929233000000",
+      "components_before_forced_exit": {
+        "brokerage": "1900",
+        "exchange": "188.212407500",
+        "stt": "277.60590000",
+        "sebi": "0.3551177500",
+        "stamp_duty": "5.101414500",
+        "gst": "375.942154545000",
+        "dp": "0",
+        "ipft": "0"
+      }
+    },
+    "max_drawdown": "-19076.919622670000",
+    "max_inventory": 260,
+    "max_inventory_at": "2026-01-02T15:29:00+05:30",
+    "capital": {
+      "peak_capital_excluding_margin": {
+        "value": "34109.4000",
+        "at": "2026-01-02T15:29:00+05:30",
+        "underlying_spot": "26336.8",
+        "gross_filled_net_qty": 260,
+        "net_filled_qty": -260,
+        "projected_short_qty": 260,
+        "decomposition": [
+          {
+            "symbol": "NIFTY2610626250CE",
+            "filled_buy_qty": 0,
+            "filled_sell_qty": 260,
+            "filled_net_qty": -260,
+            "filled_net_long_qty": 0,
+            "current_option_mark": "131.19",
+            "pending_buy_qty": 260,
+            "pending_sell_qty": 0,
+            "pending_buy_premium_reserve": "34109.4000",
+            "conservative_projected_short_qty": 260
+          }
+        ]
+      },
+      "peak_capital_including_margin": {
+        "value": "828031.750",
+        "at": "2026-01-30T14:21:00+05:30",
+        "underlying_spot": "25354.9",
+        "gross_filled_net_qty": 260,
+        "net_filled_qty": -260,
+        "projected_short_qty": 325,
+        "decomposition": [
+          {
+            "symbol": "NIFTY2620325750CE",
+            "filled_buy_qty": 65,
+            "filled_sell_qty": 325,
+            "filled_net_qty": -260,
+            "filled_net_long_qty": 0,
+            "current_option_mark": "72.05",
+            "pending_buy_qty": 65,
+            "pending_sell_qty": 65,
+            "pending_buy_premium_reserve": "3997.5",
+            "conservative_projected_short_qty": 325
+          }
+        ]
+      },
+      "peak_capital_recommended": {
+        "value": "910834.92500",
+        "at": "2026-01-30T14:21:00+05:30",
+        "underlying_spot": "25354.9",
+        "projected_short_qty": 325
+      },
+      "monthly_profit_pct_excluding_margin": "4.143346898508915430936926478",
+      "monthly_profit_pct_including_margin": "0.1706783305108771493363630078",
+      "annualized_profit_pct_excluding_margin": "49.72016278210698517124311774",
+      "annualized_profit_pct_including_margin": "2.048139966130525792036356094",
+      "annualization": "in_sample_linear_annualized; simple monthly percentage multiplied by 12; not CAGR or compounding",
+      "coverage_complete": true
+    },
+    "trace_digest": "5ec6e096fe98c23e549bd69ecb550ae1e079bc706629d0ac14e0660230b41cc7",
+    "repeat_trace_file_sha256": "7d7afd0bbf20924d72df51934c1bb7ce9369b4f2d30ef10b404b83252ec25eea",
+    "report_hash": "sha256:d0eb9168b64b70bf45d050a89786adcc3cc0f1aecb5da6b093d4da8b551d1dda",
+    "report_file_sha256": "4a75d6f757d65c44bb6ad8ac9e349375eb10896ea44775bcc44efa4c0b7db4dd",
+    "repeat_count": 2,
+    "accepted": true
+  },
+  "untuned_validation": [
+    {
+      "period": "2025-12",
+      "classification": "out_of_sample",
+      "forced_close_pnl": "-3303.913515688000",
+      "forced_close_equity": "996696.086484312000",
+      "fills": 84,
+      "orders": 218,
+      "cancels": 92,
+      "fees": "2501.513515688000",
+      "max_drawdown": "-12452.551613050000",
+      "max_inventory": 225,
+      "max_inventory_at": "2025-12-04T10:30:00+05:30",
+      "peak_capital_excluding_margin": {
+        "value": "16290.0000",
+        "at": "2025-12-05T15:29:00+05:30"
+      },
+      "peak_capital_including_margin": {
+        "value": "792517.500",
+        "at": "2025-12-05T12:53:00+05:30"
+      },
+      "peak_capital_recommended": {
+        "value": "871769.25000",
+        "at": "2025-12-05T12:53:00+05:30"
+      },
+      "monthly_profit_pct_excluding_margin": "-20.28185092503376304481276857",
+      "monthly_profit_pct_including_margin": "-0.4168883987657054891532363639",
+      "annualized_profit_pct_excluding_margin": "-243.3822111004051565377532228",
+      "annualized_profit_pct_including_margin": "-5.002660785188465869838836367",
+      "trace_digest": "a1999a6781ea7e3221df18a8cf0d28ead0cc35455a6151218a7486b241641161",
+      "report_hash": "sha256:8140534677359b19210c7f6ba0a7df1e1a2a390470bf7467921b9a85b4941347",
+      "accepted": false
+    },
+    {
+      "period": "2026-02",
+      "classification": "out_of_sample",
+      "forced_close_pnl": "-19003.559514900000",
+      "forced_close_equity": "980996.440485100000",
+      "fills": 69,
+      "orders": 186,
+      "cancels": 78,
+      "fees": "1986.559514900000",
+      "max_drawdown": "-29149.228105450000",
+      "max_inventory": 260,
+      "max_inventory_at": "2026-02-17T10:29:00+05:30",
+      "peak_capital_excluding_margin": {
+        "value": "23845.2500",
+        "at": "2026-02-03T09:16:00+05:30"
+      },
+      "peak_capital_including_margin": {
+        "value": "841051.250",
+        "at": "2026-02-17T10:31:03+05:30"
+      },
+      "peak_capital_recommended": {
+        "value": "925156.37500",
+        "at": "2026-02-17T10:31:03+05:30"
+      },
+      "monthly_profit_pct_excluding_margin": "-79.69536706430001782325620407",
+      "monthly_profit_pct_including_margin": "-2.259500775357030858702130221",
+      "annualized_profit_pct_excluding_margin": "-956.3444047716002138790744488",
+      "annualized_profit_pct_including_margin": "-27.11400930428437030442556265",
+      "trace_digest": "1b1536470bce3f937ac9089fa2561f658587d22619bd413d83b66f38ba8aa8c5",
+      "report_hash": "sha256:21a7583ccfdca1b420c79c19941765b5574e16490537cbe410b355fd1540ce6e",
+      "accepted": false
+    }
+  ],
+  "dashboard": {
+    "path": "wave_replay_output/january-experiment/final-audit-v3/winner-january-dashboard.html",
+    "size_bytes": 2618067,
+    "sha256": "e08aaa180847e23a0fdce3bd3349fca236d00e2e6c9b242e5e50f142e6e37453",
+    "visual_validation": "complete"
+  },
+  "fee_precision_effect": {
+    "previous_rounded_winner_forced_close_pnl": "1413.2800",
+    "full_precision_winner_forced_close_pnl": "1413.270767000000",
+    "difference": "-0.009233000000"
+  },
+  "interpretation": "The winner satisfies the in-sample forced-close acceptance threshold but loses money in both adjacent out-of-sample months. Treat it as overfit and not production-ready."
+}
