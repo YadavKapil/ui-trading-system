@@ -11,10 +11,14 @@ def reset_pairing_state():
     common_lib._order_pairing_depth = 0
     common_lib._order_update_drain_active = False
     common_lib._deferred_order_updates = []
+    common_lib._same_side_fill_times = {"BUY": [], "SELL": []}
+    common_lib._cooldown_active_until = {"BUY": None, "SELL": None}
     yield
     common_lib._order_pairing_depth = 0
     common_lib._order_update_drain_active = False
     common_lib._deferred_order_updates = []
+    common_lib._same_side_fill_times = {"BUY": [], "SELL": []}
+    common_lib._cooldown_active_until = {"BUY": None, "SELL": None}
 
 
 def _set_order_state():
@@ -75,6 +79,50 @@ def test_restored_orders_are_reciprocally_paired():
     assert common_lib.orders["38"]["associated_order"] == "37"
 
 
+def test_restoration_skips_only_the_side_in_cooldown():
+    _set_order_state()
+
+    with (
+        patch.object(common_lib, "set_restrictions", return_value=_restrictions()),
+        patch.object(common_lib, "get_position_for_symbol", return_value=0),
+        patch.object(
+            common_lib,
+            "is_side_in_cooldown",
+            side_effect=lambda side, symbol: side == "SELL",
+        ),
+        patch.object(common_lib, "place_order", return_value="38") as place_order,
+        patch.object(common_lib, "invalidate_positions_cache"),
+        patch.object(common_lib, "_reprice_orders_on_multiplier_change", return_value=False),
+        patch.object(common_lib, "write_status_to_file"),
+    ):
+        common_lib.check_changes_in_restrictions("NIFTY2611326600CE")
+
+    place_order.assert_called_once()
+    assert place_order.call_args.args[2] == "BUY"
+    assert common_lib.orders["38"]["transaction_type"] == "BUY"
+    assert common_lib.orders["38"]["associated_order"] == -1
+
+
+def test_restoration_replaces_side_after_cooldown_expires():
+    _set_order_state()
+    order_ids = iter(("37", "38"))
+
+    with (
+        patch.object(common_lib, "set_restrictions", return_value=_restrictions()),
+        patch.object(common_lib, "get_position_for_symbol", return_value=0),
+        patch.object(common_lib, "is_side_in_cooldown", return_value=False),
+        patch.object(common_lib, "place_order", side_effect=lambda *args: next(order_ids)) as place_order,
+        patch.object(common_lib, "invalidate_positions_cache"),
+        patch.object(common_lib, "_reprice_orders_on_multiplier_change", return_value=False),
+        patch.object(common_lib, "write_status_to_file"),
+    ):
+        common_lib.check_changes_in_restrictions("NIFTY2611326600CE")
+
+    assert [call.args[2] for call in place_order.call_args_list] == ["SELL", "BUY"]
+    assert common_lib.orders["37"]["associated_order"] == "38"
+    assert common_lib.orders["38"]["associated_order"] == "37"
+
+
 def _run_normal_pair_callback(callback_on_placement, *, threaded=False):
     _set_order_state()
     common_lib.quantity = 65
@@ -128,6 +176,7 @@ def _run_normal_pair_callback(callback_on_placement, *, threaded=False):
         patch.object(common_lib, "set_scraper_last_price"),
         patch.object(common_lib, "delete_order_from_list"),
         patch.object(common_lib, "cancel_all_pending_gtts_for_symbol"),
+        patch.object(common_lib, "is_market_open", return_value=True),
         patch.object(common_lib, "invalidate_positions_cache"),
         patch.object(common_lib.time, "sleep"),
     ):

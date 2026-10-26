@@ -4031,7 +4031,23 @@ def check_changes_in_restrictions(symbol):
         _begin_order_pairing()
         pairing_active = True
 
-        if restrict_sell_order == 0 and is_sell_present == 0:
+        sell_restore_in_cooldown = (
+            restrict_sell_order == 0
+            and is_sell_present == 0
+            and is_side_in_cooldown(kite.TRANSACTION_TYPE_SELL, symbol)
+        )
+        buy_restore_in_cooldown = (
+            restrict_buy_order == 0
+            and is_buy_present == 0
+            and is_side_in_cooldown(kite.TRANSACTION_TYPE_BUY, symbol)
+        )
+
+        if sell_restore_in_cooldown:
+            logging.info(
+                "check_changes_in_restrictions: sell order missing but side is in cooldown, skipping re-place"
+            )
+
+        if restrict_sell_order == 0 and is_sell_present == 0 and not sell_restore_in_cooldown:
             logging.info("check_changes_in_restrictions: sell order missing, re-placing")
 
             if duo_old_sell_price == -1:
@@ -4065,7 +4081,12 @@ def check_changes_in_restrictions(symbol):
                     is_sell_present = 1
                     _orders_modified = True
 
-        if restrict_buy_order == 0 and is_buy_present == 0:
+        if buy_restore_in_cooldown:
+            logging.info(
+                "check_changes_in_restrictions: buy order missing but side is in cooldown, skipping re-place"
+            )
+
+        if restrict_buy_order == 0 and is_buy_present == 0 and not buy_restore_in_cooldown:
             logging.info("check_changes_in_restrictions: buy order missing, re-placing")
 
             if duo_old_buy_price == -1:
