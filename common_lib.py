@@ -1014,6 +1014,10 @@ api_secret= login_details['api_secret']
 already_executing_order = 0
 
 already_updating_order = 0
+_order_pairing_lock = threading.RLock()
+_order_pairing_depth = 0
+_order_update_drain_active = False
+_deferred_order_updates = []
 
 # Cooldown for order placement
 
@@ -2083,6 +2087,10 @@ def order_complete_solo(order_id, is_on_disconnect):
     delete_order_from_list(order_id, "complete")
 
 
+def _is_real_associated_order(order_id):
+    return order_id not in (None, -1, "-1")
+
+
 def check_orders_solo():
     orders = get_orders();
     for order_id in orders.keys():
@@ -2097,7 +2105,7 @@ def check_orders_solo():
         if order_final_status['status'] == "CANCELLED": #Need to change the complete code here to order the new set at which the order was complete
             delete_order_from_list(order_id)
             associated_order_id = orders[order_id]['associated_order']
-            if associated_order_id != -1:
+            if _is_real_associated_order(associated_order_id):
                 cancel_order(kite.VARIETY_REGULAR, associated_order_id)
         else:
             if order_final_status['status'] == "COMPLETE":
@@ -2308,7 +2316,7 @@ def order_complete(order_id, is_on_disconnect, is_complete=""):
     
     # Mark associated order as system-cancelled BEFORE deleting this order
     # This prevents the associated order from triggering place_duo_order when it gets cancelled
-    if associated_order_id in orders and associated_order_id != -1:
+    if _is_real_associated_order(associated_order_id) and associated_order_id in orders:
         orders[associated_order_id]['system_cancelled'] = True
         logging.info("Marked associated order {} as system_cancelled".format(associated_order_id))
     
@@ -2320,7 +2328,7 @@ def order_complete(order_id, is_on_disconnect, is_complete=""):
     
     # Cancel associated order
     try:
-        if associated_order_id != -1:
+        if _is_real_associated_order(associated_order_id):
             cancel_order(kite.VARIETY_REGULAR, associated_order_id)
     except Exception as e:
         logging.info("Error Cancelling Order: {}".format(e))
@@ -2390,7 +2398,57 @@ def set_old_duo_prices():
 
 
 
+def _begin_order_pairing():
+    global _order_pairing_depth
+
+    with _order_pairing_lock:
+        _order_pairing_depth += 1
+
+
+def _finish_order_pairing():
+    global _order_pairing_depth
+    global _order_update_drain_active
+
+    with _order_pairing_lock:
+        if _order_pairing_depth == 0:
+            return False
+        _order_pairing_depth -= 1
+        if _order_pairing_depth == 0 and not _order_update_drain_active:
+            _order_update_drain_active = True
+            return True
+    return False
+
+
+def _drain_deferred_order_updates():
+    global _deferred_order_updates
+    global _order_update_drain_active
+
+    while True:
+        with _order_pairing_lock:
+            if not _deferred_order_updates:
+                _order_update_drain_active = False
+                return
+            updates = _deferred_order_updates
+            _deferred_order_updates = []
+
+        for ws, data in updates:
+            _process_order_update_callback(ws, data)
+
+
 def on_order_update(ws, data):
+    with _order_pairing_lock:
+        if _order_pairing_depth > 0 or _order_update_drain_active:
+            _deferred_order_updates.append((ws, dict(data)))
+            logging.info(
+                "Deferred order update for %s until sibling association is published",
+                data.get("order_id"),
+            )
+            return
+
+    _process_order_update_callback(ws, data)
+
+
+def _process_order_update_callback(ws, data):
     global orders
     global already_updating_order
 
@@ -3927,6 +3985,9 @@ def check_changes_in_restrictions(symbol):
     #    return
 
 
+    pairing_active = False
+    should_drain_order_updates = False
+
     try:
         is_sell_present = 0
         is_buy_present = 0
@@ -3951,7 +4012,7 @@ def check_changes_in_restrictions(symbol):
                 logging.info("check_changes_in_restrictions: order %s restricted, cancelling", order_id)
                 associated_order_id = orders[order_id]['associated_order']
                 orders[order_id]['associated_order'] = -1
-                if associated_order_id != -1 and associated_order_id in orders:
+                if _is_real_associated_order(associated_order_id) and associated_order_id in orders:
                     orders[associated_order_id]['associated_order'] = -1
                 cancel_order(kite.VARIETY_REGULAR, order_id)
                 _orders_modified = True
@@ -3966,6 +4027,9 @@ def check_changes_in_restrictions(symbol):
                 is_buy_present = 1
                 buy_price = orders[order_id]['price']
                 buy_order_id = order_id
+
+        _begin_order_pairing()
+        pairing_active = True
 
         if restrict_sell_order == 0 and is_sell_present == 0:
             logging.info("check_changes_in_restrictions: sell order missing, re-placing")
@@ -3998,6 +4062,7 @@ def check_changes_in_restrictions(symbol):
                         orders[buy_order_id]['associated_order'] = sell_order_id
                     else:
                         add_order_to_list(sell_order_id, final_sell_price, sell_quantity, kite.TRANSACTION_TYPE_SELL, symbol, -1, unique_tag_sell)
+                    is_sell_present = 1
                     _orders_modified = True
 
         if restrict_buy_order == 0 and is_buy_present == 0:
@@ -4033,6 +4098,9 @@ def check_changes_in_restrictions(symbol):
                         add_order_to_list(buy_order_id, final_buy_price, buy_quantity, kite.TRANSACTION_TYPE_BUY, symbol, -1, unique_tag_buy)
                     _orders_modified = True
 
+        should_drain_order_updates = _finish_order_pairing()
+        pairing_active = False
+
         # Invalidate cache after placing orders to ensure next logic tick sees true state
         invalidate_positions_cache()
 
@@ -4051,6 +4119,13 @@ def check_changes_in_restrictions(symbol):
 
     except Exception as e:
         logging.error("Error placing order: {}".format(e))
+    finally:
+        if pairing_active:
+            should_drain_order_updates = (
+                _finish_order_pairing() or should_drain_order_updates
+            )
+        if should_drain_order_updates:
+            _drain_deferred_order_updates()
     
 
 
@@ -4072,6 +4147,8 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
     global tag
 
     global exceptNFBNF
+    pairing_active = False
+    should_drain_order_updates = False
 
     global scraper_last_price
     global old_quote_price
@@ -4310,6 +4387,9 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
         print_data = {"buy restriction":restrict_buy_order,"sell restriction":restrict_sell_order}
         logging.error("Restrictions are  "+format(print_data))
 
+        _begin_order_pairing()
+        pairing_active = True
+
         # --- SELL order ---
         sell_order_id = -1
         gtt_sell_tag = None
@@ -4317,7 +4397,7 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
             unique_tag_sell = "S_" + str(int(time.time())) + "_" + str(randint(1000, 9999))
             sell_order_id = place_order(symbol, kite.VARIETY_REGULAR, kite.TRANSACTION_TYPE_SELL, exchange, typeOfProduct, final_sell_price, sell_quantity, unique_tag_sell)
             if sell_order_id != -1:
-                add_order_to_list(sell_order_id, final_sell_price, sell_quantity, kite.TRANSACTION_TYPE_SELL, symbol, "-1", unique_tag_sell)
+                add_order_to_list(sell_order_id, final_sell_price, sell_quantity, kite.TRANSACTION_TYPE_SELL, symbol, -1, unique_tag_sell)
                 orders[str(sell_order_id)]['multiplier_info'] = multiplier_info
                 logging.info(" -------------------------    Sell order placed successfully")
             else:
@@ -4364,7 +4444,7 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
                     # SELL was a GTT — BUY is regular. Register BUY with no sibling for now.
                     # Store buy_order_id back into the GTT metadata so register_gtt_triggered_order()
                     # can pair them correctly when the GTT fires.
-                    add_order_to_list(buy_order_id, final_buy_price, buy_quantity, kite.TRANSACTION_TYPE_BUY, symbol, "-1", unique_tag_buy)
+                    add_order_to_list(buy_order_id, final_buy_price, buy_quantity, kite.TRANSACTION_TYPE_BUY, symbol, -1, unique_tag_buy)
                     orders[str(buy_order_id)]['multiplier_info'] = multiplier_info
                     if gtt_sell_tag and gtt_sell_tag in pending_gtt_fallbacks:
                         pending_gtt_fallbacks[gtt_sell_tag]['associated_regular_order_id'] = buy_order_id
@@ -4408,6 +4488,9 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
                         if gtt_sell_tag and gtt_sell_tag in pending_gtt_fallbacks:
                             delete_gtt(pending_gtt_fallbacks[gtt_sell_tag]['trigger_id'])
                             del pending_gtt_fallbacks[gtt_sell_tag]
+
+        should_drain_order_updates = _finish_order_pairing()
+        pairing_active = False
         
         old_quote_price = price
         duo_old_sell_price = final_sell_price 
@@ -4425,7 +4508,15 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
     
     except (kite_exceptions.NetworkException, kite_exceptions.DataException) as e:
         logging.warning(f"Transient error in place_duo_order: {e}. Retrying after 5s delay...")
+        if pairing_active:
+            should_drain_order_updates = (
+                _finish_order_pairing() or should_drain_order_updates
+            )
+            pairing_active = False
         already_executing_order = 0
+        if should_drain_order_updates:
+            _drain_deferred_order_updates()
+            should_drain_order_updates = False
         time.sleep(5)
         try:
             place_duo_order(symbol, typeOfProduct, exceptNFBNFLocal)
@@ -4435,7 +4526,13 @@ def place_duo_order(symbol, typeOfProduct = "NRML", exceptNFBNFLocal = False):
     except Exception as e:
         logging.error("Error in place_duo_order: {}".format(e))
     finally:
+        if pairing_active:
+            should_drain_order_updates = (
+                _finish_order_pairing() or should_drain_order_updates
+            )
         already_executing_order=0
+        if should_drain_order_updates:
+            _drain_deferred_order_updates()
         logging.info("Released semaphore in place_duo_order")
 
 
